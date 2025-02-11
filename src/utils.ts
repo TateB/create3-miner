@@ -26,13 +26,13 @@ export const generateArgInitialisers = ({
   threshold: number;
 }) =>
   "b63e800d" + //Function signature
-  "100".padStart(64, "0") + // Version
+  "100".padStart(64, "0") + // owners.offset
   threshold.toString().padStart(64, "0") + // Threshold
   zeroAddress.substring(2).padStart(64, "0") + // Address zero, TO
   pad(toHex(0x120 + 0x20 * owners.length))
     .substring(2)
-    .padStart(64, "0") + // Data length
-  FALLBACK_HANDLER.substring(2).padStart(64, "0") +
+    .padStart(64, "0") + // data.offset
+  FALLBACK_HANDLER.substring(2).padStart(64, "0") + // fallbackHandler
   zeroAddress.substring(2).padStart(64, "0") + // paymentToken
   ZERO.padStart(64, "0") + // payment
   zeroAddress.substring(2).padStart(64, "0") + // paymentReceiver

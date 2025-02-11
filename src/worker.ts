@@ -41,7 +41,10 @@ self.onmessage = async (event: MessageEvent<WorkerIncomingMessage>) => {
       seed: createSeed(),
     });
     if (address !== "0x") {
-      postMessage({ type: "success", data: { address, salt } });
+      postMessage({
+        type: "success",
+        data: { address, salt, argInitialisers },
+      });
     }
   } else if (msg.data === "stop") {
     console.log(`worker id: ${name} stopped`);
