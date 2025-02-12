@@ -237,8 +237,8 @@ impl GpuVanitySearch {
             dbg_println!("GPU: Buffers set");
 
             // Configure thread groups
-            let threads_per_threadgroup = metal::MTLSize::new(thread_count, 1, 1);
-            let threadgroups = metal::MTLSize::new(threadgroup_count, 1, 1); // Much larger search space
+            let threads_per_threadgroup = metal::MTLSize::new(thread_count as u64, 1, 1);
+            let threadgroups = metal::MTLSize::new(threadgroup_count as u64, 1, 1); // Much larger search space
 
             dbg_println!("GPU: Thread groups configured");
             dbg_println!(
@@ -284,8 +284,9 @@ impl GpuVanitySearch {
             unsafe {
                 let found = *(found_buffer.contents() as *const bool);
                 let salt = std::slice::from_raw_parts(result_buffer.contents() as *const u8, 32);
-                self.iterations
-                    .set(self.iterations.get() + thread_count * threadgroup_count);
+                self.iterations.set(
+                    self.iterations.get() + (thread_count as u64) * (threadgroup_count as u64),
+                );
                 let iterations_per_second = (self.iterations.get() as f64) / self.time_taken.get();
                 println!(
                     "GPU: Iterations per second: {}",
@@ -330,4 +331,4 @@ impl GpuVanitySearch {
             }
         })
     }
-} 
+}

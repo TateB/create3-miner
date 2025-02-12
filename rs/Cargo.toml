@@ -25,6 +25,12 @@ rustacuda_core = { version = "0.1.2", optional = true }
 rustacuda_derive = { version = "0.1.2", optional = true }
 
 [features]
-default = ["cuda"]
-cuda = ["dep:cuda-runtime-sys", "dep:cuda-driver-sys", "dep:rustacuda", "dep:rustacuda_core", "dep:rustacuda_derive"]
+default = ["metal"]
+cuda = [
+  "dep:cuda-runtime-sys",
+  "dep:cuda-driver-sys",
+  "dep:rustacuda",
+  "dep:rustacuda_core",
+  "dep:rustacuda_derive",
+]
 metal = ["dep:metal", "dep:objc", "dep:block"]
