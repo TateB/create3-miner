@@ -76,12 +76,14 @@ impl GpuVanitySearch {
         })
     }
 
-    pub fn search(
+    pub fn search_with_threads(
         &self,
         deployer: &[u8],
         prefix: &str,
         namespace: &str,
         initial_salt: &[u8],
+        thread_count: u32,
+        threadgroup_count: u32,
     ) -> Option<&[u8]> {
         autoreleasepool(|| {
             let capture_scope =
@@ -233,9 +235,6 @@ impl GpuVanitySearch {
             encoder.set_buffer(7, Some(&found_buffer), 0);
             dbg_println!("GPU: Found buffer set");
             dbg_println!("GPU: Buffers set");
-
-            let thread_count = 64;
-            let threadgroup_count = 65536;
 
             // Configure thread groups
             let threads_per_threadgroup = metal::MTLSize::new(thread_count, 1, 1);

@@ -6,6 +6,7 @@ mod gpu_search;
 
 use alloy_primitives::{keccak256, Address, B256};
 use anyhow::Result;
+use clap::Parser;
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -16,7 +17,45 @@ use std::{
 use tokio::task;
 
 use crate::create3::compute_create3_address;
-use gpu_search::GpuVanitySearch;
+use gpu_search::{GpuBackend, GpuVanitySearch};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// The deployer address
+    deployer: String,
+
+    /// The prefix to search for
+    prefix: String,
+
+    /// Optional namespace
+    #[arg(long)]
+    namespace: Option<String>,
+
+    /// Enable CPU mining
+    #[arg(long = "cpu.enabled", default_value = "false")]
+    cpu_enabled: bool,
+
+    /// Number of CPU threads to use
+    #[arg(long = "cpu.threads")]
+    cpu_threads: Option<usize>,
+
+    /// Enable GPU mining
+    #[arg(long = "gpu.enabled", default_value = "true")]
+    gpu_enabled: bool,
+
+    /// Force specific GPU API (cuda or metal)
+    #[arg(long = "gpu.api")]
+    gpu_api: Option<String>,
+
+    /// Number of GPU threads per block/threadgroup
+    #[arg(long = "gpu.threads")]
+    gpu_threads: Option<u32>,
+
+    /// Number of blocks/threadgroups
+    #[arg(long = "gpu.thread-groups", default_value = "65536")]
+    gpu_thread_groups: u32,
+}
 
 fn create_random_salt() -> B256 {
     let now = std::time::SystemTime::now()
@@ -57,104 +96,114 @@ impl Stats {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let args = Args::parse();
 
-    if args.len() < 3 {
+    let deployer: Address = args.deployer.parse().expect("Invalid deployer address");
+    let prefix = args.prefix.to_lowercase();
+    let namespace = args.namespace.as_deref().unwrap_or("");
+    let num_threads = args.cpu_threads.unwrap_or_else(num_cpus::get);
+
+    if args.cpu_enabled {
         println!(
-            "Usage: {} <deployer_address> <prefix> [namespace] [num_threads]",
-            args[0]
+            "Starting {} CPU threads to search for vanity address",
+            num_threads
         );
-        std::process::exit(1);
     }
-
-    let deployer: Address = args[1].parse().expect("Invalid deployer address");
-    let prefix = args[2].to_lowercase();
-    let namespace = args.get(3).map(|s| s.as_str()).unwrap_or("");
-    let num_threads = args
-        .get(4)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| num_cpus::get());
-
-    println!(
-        "Starting {} CPU threads to search for vanity address",
-        num_threads
-    );
     println!("Deployer: {}", deployer);
     println!("Prefix: {}", prefix);
-    println!("Namespace: {}", namespace);
-
-    // Initialize GPU search if available
-    let gpu_search = GpuVanitySearch::new();
-    if let Some(_gpu) = &gpu_search {
-        println!("GPU support enabled");
-    } else {
-        println!("GPU support not available, using CPU only");
+    if !namespace.is_empty() {
+        println!("Namespace: {}", namespace);
     }
 
+    let mut handles = vec![];
     let stats = Arc::new(Stats::new());
     let running = Arc::new(AtomicU64::new(1));
-    let mut handles = vec![];
 
-    // Start CPU threads first
-    for _ in 0..num_threads {
-        let stats = Arc::clone(&stats);
-        let running = Arc::clone(&running);
-        let deployer = deployer;
-        let prefix = prefix.clone();
-        let namespace = namespace.to_string();
+    // Start CPU threads if enabled
+    if args.cpu_enabled {
+        for _ in 0..num_threads {
+            let stats = Arc::clone(&stats);
+            let running = Arc::clone(&running);
+            let deployer = deployer;
+            let prefix = prefix.clone();
+            let namespace = namespace.to_string();
 
-        let handle = task::spawn(async move {
+            let handle = task::spawn(async move {
+                while running.load(Ordering::Relaxed) == 1 {
+                    let salt = create_random_salt();
+                    let address = compute_create3_address(deployer, salt, Some(&namespace))
+                        .expect("Failed to compute address");
+
+                    stats.increment();
+
+                    if format!("{:x}", address).starts_with(&prefix) {
+                        println!("\nCPU Found matching address!");
+                        println!("Address: {}", address);
+                        println!("Salt: {}", salt);
+                        running.store(0, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+    }
+
+    // Initialize GPU search if enabled
+    if args.gpu_enabled {
+        let gpu_search = if let Some(api) = args.gpu_api {
+            match api.to_lowercase().as_str() {
+                #[cfg(feature = "cuda")]
+                "cuda" => GpuVanitySearch::new_with_backend(GpuBackend::Cuda),
+                #[cfg(feature = "metal")]
+                "metal" => GpuVanitySearch::new_with_backend(GpuBackend::Metal),
+                _ => {
+                    let mut valid_apis = Vec::new();
+                    #[cfg(feature = "cuda")]
+                    valid_apis.push("'cuda'");
+                    #[cfg(feature = "metal")]
+                    valid_apis.push("'metal'");
+                    panic!("Invalid GPU API specified. Use {}", valid_apis.join(" or "));
+                }
+            }
+        } else {
+            GpuVanitySearch::new()
+        };
+
+        if let Some(gpu) = gpu_search {
+            println!("Using GPU for mining...");
             while running.load(Ordering::Relaxed) == 1 {
-                let salt = create_random_salt();
-                let address = compute_create3_address(deployer, salt, Some(&namespace))
-                    .expect("Failed to compute address");
+                if let Some(salt) = gpu.search(
+                    &deployer.to_vec(),
+                    &prefix,
+                    namespace,
+                    create_random_salt().as_slice(),
+                    args.gpu_threads,
+                    Some(args.gpu_thread_groups),
+                ) {
+                    let salt = B256::from_slice(&salt);
+                    let address = compute_create3_address(deployer, salt, Some(namespace))
+                        .expect("Failed to compute address");
 
-                stats.increment();
+                    // Verify the address matches the prefix
+                    let addr_str = format!("{:x}", address);
+                    if !addr_str.starts_with(&prefix.to_lowercase()) {
+                        panic!(
+                            "GPU found invalid address: expected prefix '{}' but got '{}'",
+                            prefix, addr_str
+                        );
+                    }
 
-                if format!("{:x}", address).starts_with(&prefix) {
-                    println!("\nCPU Found matching address!");
+                    println!("\nGPU Found matching address!");
                     println!("Address: {}", address);
                     println!("Salt: {}", salt);
                     running.store(0, Ordering::Relaxed);
                     break;
                 }
             }
-        });
-        handles.push(handle);
-    }
-
-    // Run GPU search in main thread if available
-    if let Some(gpu) = gpu_search {
-        println!("Using GPU for mining...");
-        while running.load(Ordering::Relaxed) == 1 {
-            if let Some(salt) = gpu.search(
-                &deployer.to_vec(),
-                &prefix,
-                &namespace,
-                create_random_salt().as_slice(),
-            ) {
-                let salt = B256::from_slice(&salt);
-                let address = compute_create3_address(deployer, salt, Some(&namespace))
-                    .expect("Failed to compute address");
-
-                // Verify the address matches the prefix
-                let addr_str = format!("{:x}", address);
-                if !addr_str.starts_with(&prefix.to_lowercase()) {
-                    panic!(
-                        "GPU found invalid address: expected prefix '{}' but got '{}'",
-                        prefix, addr_str
-                    );
-                }
-
-                println!("\nGPU Found matching address!");
-                println!("Address: {}", address);
-                println!("Salt: {}", salt);
-                running.store(0, Ordering::Relaxed);
-                break;
-            }
+        } else {
+            println!("GPU support not available");
         }
-    } else {
-        println!("GPU support not available");
     }
 
     // Wait for any thread to find a result

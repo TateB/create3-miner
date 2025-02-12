@@ -73,12 +73,14 @@ impl GpuVanitySearch {
         })
     }
 
-    pub fn search(
+    pub fn search_with_threads(
         &self,
         deployer: &[u8],
         prefix: &str,
         namespace: &str,
         initial_salt: &[u8],
+        thread_count: u32,
+        block_count: u32,
     ) -> Option<Vec<u8>> {
         // Convert deployer address to bytes
         let deployer_bytes = if deployer.len() == 20 {
@@ -114,9 +116,6 @@ impl GpuVanitySearch {
         let mut found = vec![0i32; 1];
         let mut found_buf = DeviceBuffer::from_slice(&found).unwrap();
 
-        // Launch kernel
-        let thread_count = 256;
-        let block_count = 65536;
 
         let function_name = CString::new("vanity_search").unwrap();
         let function = self.module.get_function(&function_name).unwrap();
