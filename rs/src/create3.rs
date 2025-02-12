@@ -5,26 +5,25 @@ use crate::constants::{create3_factory, FACTORY_BYTECODE};
 
 /// Compute CREATE2 address according to EIP-1014
 pub fn compute_create2_address(deployer: Address, salt: B256, bytecode: &[u8]) -> Address {
-    let init_code_hash = keccak256(bytecode).to_vec();
+    let init_code_hash = keccak256(bytecode);
 
     // keccak256(0xff ++ deployer ++ salt ++ keccak256(bytecode))[12:]
     let mut input = Vec::with_capacity(1 + 20 + 32 + 32);
     input.push(0xff);
-    input.extend_from_slice(&deployer.to_vec());
-    input.extend_from_slice(&salt.to_vec());
-    input.extend_from_slice(&init_code_hash);
+    input.extend_from_slice(deployer.as_slice());
+    input.extend_from_slice(salt.as_slice());
+    input.extend_from_slice(init_code_hash.as_slice());
 
     let hash = keccak256(&input);
-    Address::from_slice(&hash[12..])
+    Address::from_slice(&hash.as_slice()[12..])
 }
 
 /// Create a namespaced salt by hashing the original salt with a namespace string
 pub fn create_arbitrary_namespaced_salt(salt: B256, namespace: &str) -> B256 {
     let mut input = Vec::with_capacity(32 + namespace.len());
-    input.extend_from_slice(&salt.to_vec());
+    input.extend_from_slice(salt.as_slice());
     input.extend_from_slice(namespace.as_bytes());
-    let hash = keccak256(&input).to_vec();
-    B256::from_slice(&hash)
+    keccak256(&input)
 }
 
 /// Compute CREATE3 address
@@ -46,10 +45,9 @@ pub fn compute_create3_address(
 
     // Then hash with the deployer address
     let mut input = Vec::with_capacity(20 + 32);
-    input.extend_from_slice(&deployer.to_vec());
-    input.extend_from_slice(&arbitrary_namespaced_salt.to_vec());
-    let hash = keccak256(&input).to_vec();
-    let namespaced_salt = B256::from_slice(&hash);
+    input.extend_from_slice(deployer.as_slice());
+    input.extend_from_slice(arbitrary_namespaced_salt.as_slice());
+    let namespaced_salt = keccak256(&input);
 
     // Compute proxy address using CREATE2
     let factory = create3_factory();
@@ -64,18 +62,26 @@ pub fn compute_create3_address(
     let mut rlp = Vec::with_capacity(22); // 1 + 1 + 20 + 1
     rlp.push(0xd6); // prefix
     rlp.push(0x94); // address marker
-    rlp.extend_from_slice(&proxy_address.to_vec());
+    rlp.extend_from_slice(proxy_address.as_slice());
     rlp.push(0x01); // nonce
 
-    Ok(Address::from_slice(&keccak256(&rlp)[12..]))
+    Ok(Address::from_slice(&keccak256(&rlp).as_slice()[12..]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{test_deployer, TEST_SALT};
 
     const TEST_NAMESPACE: &str = "L2ReverseRegistrar v1.0.0";
+    const TEST_DEPLOYER: &str = "0x343431e9CEb7C19cC8d3eA0EE231bfF82B584910";
+    const TEST_SALT: &str = "0x7cc6b9a2afa05a889a0394c767107d001d86bf77bea0141c11c296d3a8f72dac";
+
+    // Helper function to get TEST_DEPLOYER as Address
+    fn test_deployer() -> Address {
+        TEST_DEPLOYER
+            .parse()
+            .expect("Invalid test deployer address")
+    }
 
     #[test]
     fn test_create2_address_computation() {
