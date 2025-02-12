@@ -35,7 +35,7 @@ impl GpuVanitySearch {
             let device = Device::system_default()?;
             println!("Found Metal device: {}", device.name());
 
-            let shader_src = include_str!("shader/Keccak256.metal");
+            let shader_src = include_str!("../shader/Keccak256.metal");
             let library =
                 match device.new_library_with_source(shader_src, &metal::CompileOptions::new()) {
                     Ok(lib) => lib,
@@ -331,4 +331,4 @@ impl GpuVanitySearch {
             }
         })
     }
-}
+} 

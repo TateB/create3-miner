@@ -1,7 +1,8 @@
 mod constants;
 mod create3;
-mod gpu;
+#[cfg(feature = "metal")]
 mod test_shader;
+mod gpu_search;
 
 use alloy_primitives::{keccak256, Address, B256};
 use anyhow::Result;
@@ -15,7 +16,7 @@ use std::{
 use tokio::task;
 
 use crate::create3::compute_create3_address;
-use crate::gpu::GpuVanitySearch;
+use gpu_search::GpuVanitySearch;
 
 fn create_random_salt() -> B256 {
     let now = std::time::SystemTime::now()
@@ -94,49 +95,7 @@ async fn main() -> Result<()> {
     let running = Arc::new(AtomicU64::new(1));
     let mut handles = vec![];
 
-    // Start GPU search if available
-    let gpu_handle = if let Some(gpu) = gpu_search {
-        let running = Arc::clone(&running);
-        let deployer_bytes = deployer.to_vec();
-        let prefix = prefix.clone();
-        let namespace = namespace.to_string();
-
-        println!("Starting GPU search only (CPU search disabled for debugging)");
-        Some(task::spawn(async move {
-            while running.load(Ordering::Relaxed) == 1 {
-                if let Some(salt) = gpu.search(
-                    &deployer_bytes,
-                    &prefix,
-                    &namespace,
-                    create_random_salt().as_slice(),
-                ) {
-                    let salt = B256::from_slice(&salt);
-                    let address = compute_create3_address(deployer, salt, Some(&namespace))
-                        .expect("Failed to compute address");
-
-                    // Verify the address matches the prefix
-                    let addr_str = format!("{:x}", address);
-                    if !addr_str.starts_with(&prefix.to_lowercase()) {
-                        panic!(
-                            "GPU found invalid address: expected prefix '{}' but got '{}'",
-                            prefix, addr_str
-                        );
-                    }
-
-                    println!("\nGPU Found matching address!");
-                    println!("Address: {}", address);
-                    println!("Salt: {}", salt);
-                    running.store(0, Ordering::Relaxed);
-                    break;
-                }
-            }
-        }))
-    } else {
-        println!("GPU support not available");
-        return Ok(());
-    };
-
-    // Start CPU threads
+    // Start CPU threads first
     for _ in 0..num_threads {
         let stats = Arc::clone(&stats);
         let running = Arc::clone(&running);
@@ -161,13 +120,41 @@ async fn main() -> Result<()> {
                 }
             }
         });
-
         handles.push(handle);
     }
 
-    // Add GPU handle to the list if it exists
-    if let Some(handle) = gpu_handle {
-        handles.push(handle);
+    // Run GPU search in main thread if available
+    if let Some(gpu) = gpu_search {
+        println!("Using GPU for mining...");
+        while running.load(Ordering::Relaxed) == 1 {
+            if let Some(salt) = gpu.search(
+                &deployer.to_vec(),
+                &prefix,
+                &namespace,
+                create_random_salt().as_slice(),
+            ) {
+                let salt = B256::from_slice(&salt);
+                let address = compute_create3_address(deployer, salt, Some(&namespace))
+                    .expect("Failed to compute address");
+
+                // Verify the address matches the prefix
+                let addr_str = format!("{:x}", address);
+                if !addr_str.starts_with(&prefix.to_lowercase()) {
+                    panic!(
+                        "GPU found invalid address: expected prefix '{}' but got '{}'",
+                        prefix, addr_str
+                    );
+                }
+
+                println!("\nGPU Found matching address!");
+                println!("Address: {}", address);
+                println!("Salt: {}", salt);
+                running.store(0, Ordering::Relaxed);
+                break;
+            }
+        }
+    } else {
+        println!("GPU support not available");
     }
 
     // Wait for any thread to find a result
@@ -229,12 +216,14 @@ mod tests {
         let running = Arc::new(AtomicU64::new(1));
         let mut handles = vec![];
 
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        
         for _ in 0..num_threads {
             let stats = Arc::clone(&stats);
             let running = Arc::clone(&running);
             let prefix = prefix.to_string();
 
-            let handle = task::spawn(async move {
+            let handle = runtime.spawn(async move {
                 let mut found_salt = None;
                 while running.load(Ordering::Relaxed) == 1 {
                     let salt = create_random_salt();
@@ -255,7 +244,9 @@ mod tests {
             handles.push(handle);
         }
 
-        let results = futures::future::join_all(handles).await;
+        let results = runtime.block_on(async {
+            futures::future::join_all(handles).await
+        });
         let found_salt = results.into_iter().find_map(|r| r.unwrap());
 
         assert!(found_salt.is_some(), "Failed to find matching address");
