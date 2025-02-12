@@ -196,4 +196,114 @@ impl Drop for GpuVanitySearch {
 
         // The context will be dropped last automatically
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::B256;
+    use crate::constants::tests::{test_deployer, TEST_SALT, TEST_NAMESPACE};
+    use crate::create3::compute_create3_address;
+
+    #[test]
+    fn test_cuda_create3_basic() {
+        let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
+        
+        let deployer = test_deployer();
+        let initial_salt = B256::ZERO.to_vec();
+        
+        // Test without namespace
+        let result = gpu.search_with_threads(&deployer.as_slice(), "", "", &initial_salt, 1, 1);
+        assert!(result.is_some(), "Should find a result");
+        
+        let found_salt = result.unwrap();
+        let found_address = compute_create3_address(deployer, B256::from_slice(&found_salt), None)
+            .expect("Failed to compute address");
+        
+        // The address should be valid
+        assert!(found_address.to_string().starts_with("0x"), "Address should start with 0x");
+        assert_eq!(found_address.to_string().len(), 42, "Address should be 42 chars long");
+    }
+
+    #[test]
+    fn test_cuda_create3_with_namespace() {
+        let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
+        
+        let deployer = test_deployer();
+        let initial_salt = B256::ZERO.to_vec();
+        
+        // Test with namespace
+        let result = gpu.search_with_threads(&deployer.as_slice(), "", TEST_NAMESPACE, &initial_salt, 1, 1);
+        assert!(result.is_some(), "Should find a result");
+        
+        let found_salt = result.unwrap();
+        let found_address = compute_create3_address(deployer, B256::from_slice(&found_salt), Some(TEST_NAMESPACE))
+            .expect("Failed to compute address");
+        
+        // The address should be valid
+        assert!(found_address.to_string().starts_with("0x"), "Address should start with 0x");
+        assert_eq!(found_address.to_string().len(), 42, "Address should be 42 chars long");
+    }
+
+    #[test]
+    fn test_cuda_create3_prefix_matching() {
+        let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
+        
+        let deployer = test_deployer();
+        let initial_salt = B256::ZERO.to_vec();
+        
+        // Test with a prefix that doesn't match - should return None
+        let result = gpu.search_with_threads(&deployer.as_slice(), "ffff", "", &initial_salt, 1, 1);
+        assert!(result.is_none(), "Should not find a result with non-matching prefix in single iteration");
+        
+        // Test with a prefix that should be findable
+        let result = gpu.search_with_threads(&deployer.as_slice(), "0", "", &initial_salt, 1, 65536);
+        assert!(result.is_some(), "Should find a result with simple prefix");
+        
+        let found_salt = result.unwrap();
+        let found_address = compute_create3_address(deployer, B256::from_slice(&found_salt), None)
+            .expect("Failed to compute address");
+        
+        // The address should start with the prefix
+        assert!(
+            found_address.to_string().to_lowercase().starts_with("0x0"),
+            "Address should start with 0x0, got {}",
+            found_address
+        );
+    }
+
+    #[test]
+    fn test_cuda_create3_multithreaded() {
+        let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
+        
+        let deployer = test_deployer();
+        let initial_salt = B256::ZERO.to_vec();
+        
+        // Test with multiple threads - should find a result faster
+        let result = gpu.search_with_threads(&deployer.as_slice(), "00", "", &initial_salt, 256, 65536);
+        assert!(result.is_some(), "Should find a result with multiple threads");
+        
+        let found_salt = result.unwrap();
+        let found_address = compute_create3_address(deployer, B256::from_slice(&found_salt), None)
+            .expect("Failed to compute address");
+        
+        // The address should start with the prefix
+        assert!(
+            found_address.to_string().to_lowercase().starts_with("0x00"),
+            "Address should start with 0x00, got {}",
+            found_address
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid hex in deployer address")]
+    fn test_cuda_create3_invalid_deployer() {
+        let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
+        
+        // Test with invalid deployer length
+        let invalid_deployer = vec![0; 19]; // Too short
+        let salt = TEST_SALT.parse::<B256>().expect("Invalid test salt").to_vec();
+        
+        gpu.search_with_threads(&invalid_deployer, "", "", &salt, 1, 1);
+    }
 } 
