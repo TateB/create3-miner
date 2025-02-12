@@ -16,92 +16,87 @@ __device__ inline unsigned long long ROTL64(unsigned long long x, int y) {
 }
 
 __device__ void keccak_f(unsigned long long *state) {
-    int piln[24] = { 10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1 };
+    const int rotc[24] = {
+        1,  3,  6,  10, 15, 21, 28, 36, 45, 55, 2,  14,
+        27, 41, 56, 8,  25, 43, 62, 18, 39, 61, 20, 44
+    };
+    const int piln[24] = {
+        10, 7,  11, 17, 18, 3, 5,  16, 8,  21, 24, 4,
+        15, 23, 19, 13, 12, 2, 20, 14, 22, 9,  6,  1
+    };
 
-    unsigned long long C[5], D;
+    unsigned long long t, bc[5];
+    
     for (int round = 0; round < 24; round++) {
+        // Theta
         for (int i = 0; i < 5; i++) {
-            C[i] = state[i] ^ state[i + 5] ^ state[i + 10] ^ state[i + 15] ^ state[i + 20];
+            bc[i] = state[i] ^ state[i + 5] ^ state[i + 10] ^ state[i + 15] ^ state[i + 20];
         }
 
         for (int i = 0; i < 5; i++) {
-            D = C[(i + 4) % 5] ^ ROTL64(C[(i + 1) % 5], 1);
+            t = bc[(i + 4) % 5] ^ ROTL64(bc[(i + 1) % 5], 1);
             for (int j = 0; j < 25; j += 5) {
-                state[j + i] ^= D;
+                state[j + i] ^= t;
             }
         }
 
-        unsigned long long tmp = state[1];
+        // Rho Pi
+        t = state[1];
         for (int i = 0; i < 24; i++) {
             int j = piln[i];
-            C[0] = state[j];
-            state[j] = ROTL64(tmp, (i + 1) * (i + 2) / 2 % 64);
-            tmp = C[0];
+            bc[0] = state[j];
+            state[j] = ROTL64(t, rotc[i]);
+            t = bc[0];
         }
 
+        // Chi
         for (int j = 0; j < 25; j += 5) {
-            unsigned long long t0 = state[j + 0], t1 = state[j + 1], t2 = state[j + 2], t3 = state[j + 3], t4 = state[j + 4];
-            state[j + 0] ^= ~t1 & t2;
-            state[j + 1] ^= ~t2 & t3;
-            state[j + 2] ^= ~t3 & t4;
-            state[j + 3] ^= ~t4 & t0;
-            state[j + 4] ^= ~t0 & t1;
+            for (int i = 0; i < 5; i++) {
+                bc[i] = state[j + i];
+            }
+            for (int i = 0; i < 5; i++) {
+                state[j + i] ^= (~bc[(i + 1) % 5]) & bc[(i + 2) % 5];
+            }
         }
 
+        // Iota
         state[0] ^= RC[round];
     }
 }
 
-__device__ void keccak256(unsigned char *localInput, unsigned char *localOutput, unsigned int inputLength) {
+__device__ void keccak256(unsigned char *input, unsigned char *output, unsigned int inputLength) {
     const unsigned int rsize = 136; // 1088 bits (136 bytes) for Keccak-256
     unsigned long long state[25] = {0};
-    unsigned int i = 0;
-    while (i < inputLength) {
-        if (i + rsize <= inputLength) {
-            for (unsigned int j = 0; j < rsize / 8; j++) {
-                unsigned long long block = 0;
-                for (int k = 0; k < 8; k++) {
-                    block |= (unsigned long long)(localInput[i + j * 8 + k]) << (8 * k);
-                }
-                state[j] ^= block;
-            }
-            keccak_f(state);
-            i += rsize;
-        } else {
-            // Handle the last block with padding
-            unsigned char padded[rsize] = {0};
-            for (unsigned int j = 0; j < inputLength - i; j++) {
-                padded[j] = localInput[i + j];
-            }
-            padded[inputLength - i] = 0x01; // Padding start
-            padded[rsize - 1] |= 0x80; // Padding end
-            for (unsigned int j = 0; j < rsize / 8; j++) {
-                unsigned long long block = 0;
-                for (int k = 0; k < 8; k++) {
-                    block |= (unsigned long long)(padded[j * 8 + k]) << (8 * k);
-                }
-                state[j] ^= block;
-            }
-            keccak_f(state);
-            break;
-        }
-    }
-    if (inputLength == 0) {
-        unsigned char padded[rsize] = {0};
-        padded[0] = 0x01;
-        padded[rsize - 1] |= 0x80;
+    unsigned int i;
+
+    // Absorb input
+    for (i = 0; i + rsize <= inputLength; i += rsize) {
         for (unsigned int j = 0; j < rsize / 8; j++) {
-            unsigned long long block = 0;
-            for (int k = 0; k < 8; k++) {
-                block |= (unsigned long long)(padded[j * 8 + k]) << (8 * k);
-            }
-            state[j] ^= block;
+            state[j] ^= ((unsigned long long*)&input[i])[j];
         }
         keccak_f(state);
     }
-    // Write the output
+
+    // Handle remaining input and padding
+    unsigned char last_block[rsize] = {0};
+    unsigned int remaining = inputLength - i;
+    if (remaining > 0) {
+        for (unsigned int j = 0; j < remaining; j++) {
+            last_block[j] = input[i + j];
+        }
+    }
+    last_block[remaining] = 0x01;
+    last_block[rsize - 1] |= 0x80;
+
+    for (unsigned int j = 0; j < rsize / 8; j++) {
+        state[j] ^= ((unsigned long long*)last_block)[j];
+    }
+
+    keccak_f(state);
+
+    // Extract output
     for (unsigned int j = 0; j < 32; j++) {
-        localOutput[j] = (unsigned char)((state[j / 8] >> (8 * (j % 8))) & 0xFF);
+        output[j] = ((unsigned char*)state)[j];
     }
 }
 
