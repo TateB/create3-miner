@@ -1,5 +1,8 @@
+#[cfg(feature = "metal")]
 use alloy_primitives::{hex, B256};
+#[cfg(feature = "metal")]
 use metal::*;
+#[cfg(feature = "metal")]
 use objc::rc::autoreleasepool;
 
 // Test 1: Basic hex conversion
@@ -1111,4 +1114,128 @@ mod tests {
             "CREATE3 address does not match TypeScript implementation"
         );
     }
+}
+
+#[cfg(feature = "metal")]
+pub fn test_shader() {
+    autoreleasepool(|| {
+        let device = Device::system_default().unwrap();
+        println!("Found Metal device: {}", device.name());
+
+        let shader_src = include_str!("shader/Keccak256.metal");
+        let library = device
+            .new_library_with_source(shader_src, &metal::CompileOptions::new())
+            .unwrap();
+
+        let function = library.get_function("vanity_search", None).unwrap();
+
+        let pipeline_state = device
+            .new_compute_pipeline_state_with_function(&function)
+            .unwrap();
+
+        let command_queue = device.new_command_queue();
+        println!("Command queue created");
+
+        let deployer = hex::decode("0x4e0e12d77c5d0e67d861041d11824f51b590fb").unwrap();
+        let prefix = "0000";
+        let namespace = "test";
+        let initial_salt = B256::ZERO.as_slice();
+
+        // Create buffers
+        let deployer_buffer = device.new_buffer_with_data(
+            deployer.as_ptr() as *const _,
+            deployer.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let prefix_bytes: Vec<u8> = prefix
+            .chars()
+            .map(|c| c.to_digit(16).unwrap() as u8)
+            .collect();
+        let prefix_buffer = device.new_buffer_with_data(
+            prefix_bytes.as_ptr() as *const _,
+            prefix_bytes.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let prefix_len = prefix_bytes.len() as u32;
+        let prefix_len_buffer = device.new_buffer_with_data(
+            &prefix_len as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let namespace_buffer = device.new_buffer_with_data(
+            namespace.as_ptr() as *const _,
+            namespace.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let namespace_len = namespace.len() as u32;
+        let namespace_len_buffer = device.new_buffer_with_data(
+            &namespace_len as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let initial_salt_buffer = device.new_buffer_with_data(
+            initial_salt.as_ptr() as *const _,
+            initial_salt.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let result_buffer = device.new_buffer(
+            std::mem::size_of::<u64>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let found_buffer = device.new_buffer(
+            std::mem::size_of::<bool>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Initialize found buffer to false
+        unsafe {
+            *(found_buffer.contents() as *mut bool) = false;
+        }
+
+        // Create command buffer
+        let command_buffer = command_queue.new_command_buffer();
+
+        // Create compute encoder
+        let compute_encoder = command_buffer.new_compute_command_encoder();
+
+        // Set pipeline state and buffers
+        compute_encoder.set_compute_pipeline_state(&pipeline_state);
+        compute_encoder.set_buffer(0, Some(&deployer_buffer), 0);
+        compute_encoder.set_buffer(1, Some(&prefix_buffer), 0);
+        compute_encoder.set_buffer(2, Some(&prefix_len_buffer), 0);
+        compute_encoder.set_buffer(3, Some(&namespace_buffer), 0);
+        compute_encoder.set_buffer(4, Some(&namespace_len_buffer), 0);
+        compute_encoder.set_buffer(5, Some(&initial_salt_buffer), 0);
+        compute_encoder.set_buffer(6, Some(&result_buffer), 0);
+        compute_encoder.set_buffer(7, Some(&found_buffer), 0);
+
+        // Configure thread groups
+        let threads_per_threadgroup = metal::MTLSize::new(64, 1, 1);
+        let threadgroups = metal::MTLSize::new(65536, 1, 1); // Much larger search space
+
+        // Dispatch work
+        compute_encoder.dispatch_thread_groups(threadgroups, threads_per_threadgroup);
+
+        // End encoding and commit
+        compute_encoder.end_encoding();
+        command_buffer.commit();
+
+        // Wait for completion
+        command_buffer.wait_until_completed();
+
+        // Get result
+        unsafe {
+            let found = *(found_buffer.contents() as *const bool);
+            let salt = std::slice::from_raw_parts(result_buffer.contents() as *const u8, 32);
+            println!("Found: {}", found);
+            println!("Salt: {:02x?}", salt);
+        }
+    });
 }

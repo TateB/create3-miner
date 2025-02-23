@@ -35,7 +35,7 @@ impl GpuVanitySearch {
             let device = Device::system_default()?;
             println!("Found Metal device: {}", device.name());
 
-            let shader_src = include_str!("shader/Keccak256.metal");
+            let shader_src = include_str!("../shader/Keccak256.metal");
             let library =
                 match device.new_library_with_source(shader_src, &metal::CompileOptions::new()) {
                     Ok(lib) => lib,
@@ -76,12 +76,14 @@ impl GpuVanitySearch {
         })
     }
 
-    pub fn search(
+    pub fn search_with_threads(
         &self,
         deployer: &[u8],
         prefix: &str,
         namespace: &str,
         initial_salt: &[u8],
+        thread_count: u32,
+        threadgroup_count: u32,
     ) -> Option<&[u8]> {
         autoreleasepool(|| {
             let capture_scope =
@@ -234,12 +236,9 @@ impl GpuVanitySearch {
             dbg_println!("GPU: Found buffer set");
             dbg_println!("GPU: Buffers set");
 
-            let thread_count = 64;
-            let threadgroup_count = 65536;
-
             // Configure thread groups
-            let threads_per_threadgroup = metal::MTLSize::new(thread_count, 1, 1);
-            let threadgroups = metal::MTLSize::new(threadgroup_count, 1, 1); // Much larger search space
+            let threads_per_threadgroup = metal::MTLSize::new(thread_count as u64, 1, 1);
+            let threadgroups = metal::MTLSize::new(threadgroup_count as u64, 1, 1); // Much larger search space
 
             dbg_println!("GPU: Thread groups configured");
             dbg_println!(
@@ -285,8 +284,9 @@ impl GpuVanitySearch {
             unsafe {
                 let found = *(found_buffer.contents() as *const bool);
                 let salt = std::slice::from_raw_parts(result_buffer.contents() as *const u8, 32);
-                self.iterations
-                    .set(self.iterations.get() + thread_count * threadgroup_count);
+                self.iterations.set(
+                    self.iterations.get() + (thread_count as u64) * (threadgroup_count as u64),
+                );
                 let iterations_per_second = (self.iterations.get() as f64) / self.time_taken.get();
                 println!(
                     "GPU: Iterations per second: {}",
