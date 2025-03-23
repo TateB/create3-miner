@@ -240,15 +240,6 @@ impl GpuVanitySearch {
             let threads_per_threadgroup = metal::MTLSize::new(thread_count as u64, 1, 1);
             let threadgroups = metal::MTLSize::new(threadgroup_count as u64, 1, 1); // Much larger search space
 
-            dbg_println!("GPU: Thread groups configured");
-            dbg_println!(
-                "GPU: Max threads per threadgroup: {:?}",
-                &self.pipeline_state.max_total_threads_per_threadgroup()
-            );
-            dbg_println!(
-                "GPU: Thread execution width: {:?}",
-                &self.pipeline_state.thread_execution_width()
-            );
 
             // Dispatch work
             encoder.dispatch_thread_groups(threadgroups, threads_per_threadgroup);
@@ -273,8 +264,8 @@ impl GpuVanitySearch {
             let status = command_buffer.status();
             dbg_println!("GPU: Command buffer status: {:?}", status);
 
-            let error = command_buffer.error();
-            dbg_println!("GPU: Command buffer error: {:?}", error);
+            // let error = command_buffer.error();
+            // dbg_println!("GPU: Command buffer error: {:?}", error);
 
             if std::env::var("METAL_CAPTURE_ENABLED").is_ok() {
                 capture_scope.end_scope();

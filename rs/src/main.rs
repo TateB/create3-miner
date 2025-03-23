@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::task;
 
-use crate::create3::compute_create3_address;
+use crate::create3::{compute_create3_address, compute_create2_address};
 use gpu_search::{GpuBackend, GpuVanitySearch};
 
 #[derive(Parser, Debug)]
@@ -182,17 +182,20 @@ async fn main() -> Result<()> {
                     Some(args.gpu_thread_groups),
                 ) {
                     let salt = B256::from_slice(&salt);
-                    let address = compute_create3_address(deployer, salt, Some(namespace))
-                        .expect("Failed to compute address");
+                    // 0x7f69476edfc91a3154b906b27ffc9db0856c3b7327c897efe8253aa4e7644074
+                    let contract_bytecode_hash = B256::from_slice(&hex::decode("7f69476edfc91a3154b906b27ffc9db0856c3b7327c897efe8253aa4e7644074").unwrap());
+                    let address = compute_create2_address(deployer, salt, contract_bytecode_hash);
+                    // let address = compute_create3_address(deployer, salt, Some(namespace))
+                    //     .expect("Failed to compute address");
 
-                    // Verify the address matches the prefix
-                    let addr_str = format!("{:x}", address);
-                    if !addr_str.starts_with(&prefix.to_lowercase()) {
-                        panic!(
-                            "GPU found invalid address: expected prefix '{}' but got '{}'",
-                            prefix, addr_str
-                        );
-                    }
+                    // // Verify the address matches the prefix
+                    // let addr_str = format!("{:x}", address);
+                    // if !addr_str.starts_with(&prefix.to_lowercase()) {
+                    //     panic!(
+                    //         "GPU found invalid address: expected prefix '{}' but got '{}'",
+                    //         prefix, addr_str
+                    //     );
+                    // }
 
                     println!("\nGPU Found matching address!");
                     println!("Address: {}", address);

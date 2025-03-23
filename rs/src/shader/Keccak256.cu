@@ -107,17 +107,11 @@ typedef union {
 
 __constant__ unsigned int mixConstant = 0x9e3779b9;
 
-__constant__ unsigned char CREATE3_FACTORY[20] = {
-    0x00, 0x4e, 0xe0, 0x12, 0xd7, 0x7c, 0x5d, 0x0e,
-    0x67, 0xd8, 0x61, 0x04, 0x1d, 0x11, 0x82, 0x4f,
-    0x51, 0xb5, 0x90, 0xfb
-};
-
-__constant__ unsigned char FACTORY_BYTECODE_HASH[32] = {
-    0x21, 0xc3, 0x5d, 0xbe, 0x1b, 0x34, 0x4a, 0x24, 
-    0x88, 0xcf, 0x33, 0x21, 0xd6, 0xce, 0x54, 0x2f, 
-    0x8e, 0x9f, 0x30, 0x55, 0x44, 0xff, 0x09, 0xe4, 
-    0x99, 0x3a, 0x62, 0x31, 0x9a, 0x49, 0x7c, 0x1f
+__constant__ unsigned char CONTRACT_BYTECODE_HASH[32] = {
+    0x7f, 0x69, 0x47, 0x6e, 0xdf, 0xc9, 0x1a, 0x31,
+    0x54, 0xb9, 0x06, 0xb2, 0x7f, 0xfc, 0x9d, 0xb0,
+    0x85, 0x6c, 0x3b, 0x73, 0x27, 0xc8, 0x97, 0xef,
+    0xe8, 0x25, 0x3a, 0xa4, 0xe7, 0x64, 0x40, 0x74
 };
 
 extern "C" __global__ void vanity_search(
@@ -151,56 +145,43 @@ extern "C" __global__ void vanity_search(
     unsigned int input_len = 0;
     unsigned char final_salt[32];
 
-    if (*ns_len > 0) {
-        // Add salt
-        for (unsigned int i = 0; i < 32; i++) {
-            input[input_len++] = salt.bytes[i];
-        }
-        // Add namespace
-        for (unsigned int i = 0; i < *ns_len; i++) {
-            input[input_len++] = ns[i];
-        }
-        
-        keccak256(input, final_salt, input_len);
-    } else {
-        for (unsigned int i = 0; i < 32; i++) {
-            final_salt[i] = salt.bytes[i];
-        }
+    for (unsigned int i = 0; i < 32; i++) {
+        final_salt[i] = salt.bytes[i];
     }
 
-    // Then hash with deployer
+    // // Then hash with deployer
+    // input_len = 0;
+    // for (unsigned int i = 0; i < 20; i++) {
+    //     input[input_len++] = deployer[i];
+    // }
+    // for (unsigned int i = 0; i < 32; i++) {
+    //     input[input_len++] = final_salt[i];
+    // }
+    // keccak256(input, final_salt, input_len);
+
+    // Compute CREATE2 address for proxy
     input_len = 0;
+    input[input_len++] = 0xff;  // CREATE2 prefix
     for (unsigned int i = 0; i < 20; i++) {
         input[input_len++] = deployer[i];
     }
     for (unsigned int i = 0; i < 32; i++) {
         input[input_len++] = final_salt[i];
     }
-    keccak256(input, final_salt, input_len);
-
-    // Compute CREATE2 address for proxy
-    input_len = 0;
-    input[input_len++] = 0xff;  // CREATE2 prefix
-    for (unsigned int i = 0; i < 20; i++) {
-        input[input_len++] = CREATE3_FACTORY[i];
-    }
     for (unsigned int i = 0; i < 32; i++) {
-        input[input_len++] = final_salt[i];
-    }
-    for (unsigned int i = 0; i < 32; i++) {
-        input[input_len++] = FACTORY_BYTECODE_HASH[i];
+        input[input_len++] = CONTRACT_BYTECODE_HASH[i];
     }
     keccak256(input, final_salt, input_len);
 
-    // Finally compute CREATE address for contract
-    input_len = 0;
-    input[input_len++] = 0xd6;  // RLP prefix
-    input[input_len++] = 0x94;  // Address marker
-    for (unsigned int i = 0; i < 20; i++) {
-        input[input_len++] = final_salt[12 + i];
-    }
-    input[input_len++] = 0x01;  // Nonce
-    keccak256(input, final_salt, input_len);
+    // // Finally compute CREATE address for contract
+    // input_len = 0;
+    // input[input_len++] = 0xd6;  // RLP prefix
+    // input[input_len++] = 0x94;  // Address marker
+    // for (unsigned int i = 0; i < 20; i++) {
+    //     input[input_len++] = final_salt[12 + i];
+    // }
+    // input[input_len++] = 0x01;  // Nonce
+    // keccak256(input, final_salt, input_len);
 
     // Compare the hex values with the prefix
     bool matches = true;
