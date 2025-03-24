@@ -404,8 +404,7 @@ impl GpuVanitySearch {
         let create2_pipeline = match &self.create2_pipeline_state {
             Some(pipeline) => pipeline,
             None => {
-                println!("CREATE2 Metal shader not available. Please ensure CREATE2.metal exists.");
-                return None;
+                panic!("CREATE2 Metal shader not available. Please ensure CREATE2.metal exists.");
             }
         };
 

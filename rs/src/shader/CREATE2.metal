@@ -135,9 +135,13 @@ void keccak256(thread uchar *localInput, thread uchar *localOutput, thread uint 
         if (i + rsize <= inputLength) {
             for (uint j = 0; j < rsize / 8; j++) {
                 thread ulong block = 0;
-                for (int k = 0; k < 8; k++) {
-                    block |= (ulong)(localInput[i + j * 8 + k]) << (8 * k);
-                }
+                block |= (ulong)(localInput[i + j * 8 + 1]) << (8 * 1);
+                block |= (ulong)(localInput[i + j * 8 + 2]) << (8 * 2);
+                block |= (ulong)(localInput[i + j * 8 + 3]) << (8 * 3);
+                block |= (ulong)(localInput[i + j * 8 + 4]) << (8 * 4);
+                block |= (ulong)(localInput[i + j * 8 + 5]) << (8 * 5);
+                block |= (ulong)(localInput[i + j * 8 + 6]) << (8 * 6);
+                block |= (ulong)(localInput[i + j * 8 + 7]) << (8 * 7);
                 state[j] ^= block;
             }
             keccak_f(state);
@@ -152,9 +156,14 @@ void keccak256(thread uchar *localInput, thread uchar *localOutput, thread uint 
             padded[rsize - 1] |= 0x80; // Padding end
             for (uint j = 0; j < rsize / 8; j++) {
                 thread ulong block = 0;
-                for (int k = 0; k < 8; k++) {
-                    block |= (ulong)(padded[j * 8 + k]) << (8 * k);
-                }
+                block |= (ulong)(padded[j * 8 + 0]) << (8 * 0);
+                block |= (ulong)(padded[j * 8 + 1]) << (8 * 1);
+                block |= (ulong)(padded[j * 8 + 2]) << (8 * 2);
+                block |= (ulong)(padded[j * 8 + 3]) << (8 * 3);
+                block |= (ulong)(padded[j * 8 + 4]) << (8 * 4);
+                block |= (ulong)(padded[j * 8 + 5]) << (8 * 5);
+                block |= (ulong)(padded[j * 8 + 6]) << (8 * 6);
+                block |= (ulong)(padded[j * 8 + 7]) << (8 * 7);
                 state[j] ^= block;
             }
             keccak_f(state);
@@ -167,17 +176,51 @@ void keccak256(thread uchar *localInput, thread uchar *localOutput, thread uint 
         padded[rsize - 1] |= 0x80;
         for (uint j = 0; j < rsize / 8; j++) {
             thread ulong block = 0;
-            for (int k = 0; k < 8; k++) {
-                block |= (ulong)(padded[j * 8 + k]) << (8 * k);
-            }
+            block |= (ulong)(padded[j * 8 + 0]) << (8 * 0);
+            block |= (ulong)(padded[j * 8 + 1]) << (8 * 1);
+            block |= (ulong)(padded[j * 8 + 2]) << (8 * 2);
+            block |= (ulong)(padded[j * 8 + 3]) << (8 * 3);
+            block |= (ulong)(padded[j * 8 + 4]) << (8 * 4);
+            block |= (ulong)(padded[j * 8 + 5]) << (8 * 5);
+            block |= (ulong)(padded[j * 8 + 6]) << (8 * 6);
+            block |= (ulong)(padded[j * 8 + 7]) << (8 * 7);
             state[j] ^= block;
         }
         keccak_f(state);
     }
     // Write the output
-    for (uint j = 0; j < 32; j++) {
-        localOutput[j] = (uchar)((state[j / 8] >> (8 * (j % 8))) & 0xFF);
-    }
+    localOutput[0] = (uchar)((state[0] >> (8 * 0)) & 0xFF);
+    localOutput[1] = (uchar)((state[0] >> (8 * 1)) & 0xFF);
+    localOutput[2] = (uchar)((state[0] >> (8 * 2)) & 0xFF);
+    localOutput[3] = (uchar)((state[0] >> (8 * 3)) & 0xFF);
+    localOutput[4] = (uchar)((state[0] >> (8 * 4)) & 0xFF);
+    localOutput[5] = (uchar)((state[0] >> (8 * 5)) & 0xFF);
+    localOutput[6] = (uchar)((state[0] >> (8 * 6)) & 0xFF);
+    localOutput[7] = (uchar)((state[0] >> (8 * 7)) & 0xFF);
+    localOutput[8] = (uchar)((state[1] >> (8 * 0)) & 0xFF);
+    localOutput[9] = (uchar)((state[1] >> (8 * 1)) & 0xFF);
+    localOutput[10] = (uchar)((state[1] >> (8 * 2)) & 0xFF);
+    localOutput[11] = (uchar)((state[1] >> (8 * 3)) & 0xFF);
+    localOutput[12] = (uchar)((state[1] >> (8 * 4)) & 0xFF);
+    localOutput[13] = (uchar)((state[1] >> (8 * 5)) & 0xFF);
+    localOutput[14] = (uchar)((state[1] >> (8 * 6)) & 0xFF);
+    localOutput[15] = (uchar)((state[1] >> (8 * 7)) & 0xFF);
+    localOutput[16] = (uchar)((state[2] >> (8 * 0)) & 0xFF);
+    localOutput[17] = (uchar)((state[2] >> (8 * 1)) & 0xFF);
+    localOutput[18] = (uchar)((state[2] >> (8 * 2)) & 0xFF);
+    localOutput[19] = (uchar)((state[2] >> (8 * 3)) & 0xFF);
+    localOutput[20] = (uchar)((state[2] >> (8 * 4)) & 0xFF);
+    localOutput[21] = (uchar)((state[2] >> (8 * 5)) & 0xFF);
+    localOutput[22] = (uchar)((state[2] >> (8 * 6)) & 0xFF);
+    localOutput[23] = (uchar)((state[2] >> (8 * 7)) & 0xFF);
+    localOutput[24] = (uchar)((state[3] >> (8 * 0)) & 0xFF);
+    localOutput[25] = (uchar)((state[3] >> (8 * 1)) & 0xFF);
+    localOutput[26] = (uchar)((state[3] >> (8 * 2)) & 0xFF);
+    localOutput[27] = (uchar)((state[3] >> (8 * 3)) & 0xFF);
+    localOutput[28] = (uchar)((state[3] >> (8 * 4)) & 0xFF);
+    localOutput[29] = (uchar)((state[3] >> (8 * 5)) & 0xFF);
+    localOutput[30] = (uchar)((state[3] >> (8 * 6)) & 0xFF);
+    localOutput[31] = (uchar)((state[3] >> (8 * 7)) & 0xFF);
 }
 
 typedef union {
@@ -207,7 +250,7 @@ kernel void vanity_search(
         salt.bytes[i] = initial_salt[i];
     }
     for (uint j = 0; j < 8; j++) {
-        salt.words[j] ^= tid;
+        salt.words[j] ^= (tid + j * mixConstant);
         salt.words[j] *= mixConstant;
     }
 
