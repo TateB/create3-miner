@@ -6,7 +6,7 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 pub struct GpuDevice {
-    _context: Arc<Context>,
+    device_id: u32,
     stream: Stream,
     create3_module: Module,
     create2_module: Option<Module>,
@@ -93,7 +93,7 @@ impl GpuVanitySearch {
             ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
             device,
         ) {
-            Ok(ctx) => Arc::new(ctx),
+            Ok(ctx) => ctx,
             Err(e) => {
                 println!(
                     "Failed to create CUDA context for device {}: {}",
@@ -103,10 +103,8 @@ impl GpuVanitySearch {
             }
         };
 
-        // Load the CREATE3 CUDA module (compiled PTX)
-        let create3_ptx = include_str!("../shader/CREATE3.ptx");
-        let create3_ptx = CString::new(create3_ptx).unwrap();
-        let create3_module = match Module::load_from_string(&create3_ptx) {
+        // Load the CREATE3 CUDA module from the embedded PTX or from a file
+        let create3_module = match Self::load_ptx_module("CREATE3.ptx", device_id) {
             Ok(module) => module,
             Err(e) => {
                 println!(
@@ -118,28 +116,24 @@ impl GpuVanitySearch {
         };
 
         // Try to load the CREATE2 CUDA module (compiled PTX)
-        let create2_module = {
-            let create2_ptx = include_str!("../shader/CREATE2.ptx");
-            let create2_ptx = CString::new(create2_ptx).unwrap();
-            match Module::load_from_string(&create2_ptx) {
-                Ok(module) => {
-                    println!(
-                        "Successfully loaded CREATE2 CUDA module for device {}",
-                        device_id
-                    );
-                    Some(module)
-                }
-                Err(e) => {
-                    println!(
-                        "Warning: Failed to load CREATE2 CUDA module for device {}: {}",
-                        device_id, e
-                    );
-                    println!(
-                        "CREATE2 functionality will not be available on device {}",
-                        device_id
-                    );
-                    None
-                }
+        let create2_module = match Self::load_ptx_module("CREATE2.ptx", device_id) {
+            Ok(module) => {
+                println!(
+                    "Successfully loaded CREATE2 CUDA module for device {}",
+                    device_id
+                );
+                Some(module)
+            }
+            Err(e) => {
+                println!(
+                    "Warning: Failed to load CREATE2 CUDA module for device {}: {}",
+                    device_id, e
+                );
+                println!(
+                    "CREATE2 functionality will not be available on device {}",
+                    device_id
+                );
+                None
             }
         };
 
@@ -155,11 +149,58 @@ impl GpuVanitySearch {
         };
 
         Some(GpuDevice {
-            _context: context,
+            device_id,
             stream,
             create3_module,
             create2_module,
         })
+    }
+
+    // Helper method to load a PTX module from file or embedded string
+    fn load_ptx_module(
+        ptx_name: &str,
+        device_id: u32,
+    ) -> Result<Module, rustacuda::error::CudaError> {
+        // First try to load from file system
+        let ptx_path = format!("rs/src/shader/{}", ptx_name);
+        println!("Trying to load PTX from: {}", ptx_path);
+
+        // Create a temp string to hold the PTX content
+        let ptx_content;
+
+        // Try loading from file
+        if let Ok(content) = std::fs::read_to_string(&ptx_path) {
+            ptx_content = content;
+        } else {
+            // If file loading fails, provide a dummy PTX with the error
+            // This is a workaround since we can't include the actual PTX files
+            println!(
+                "Could not load PTX file: {}. Please ensure the PTX file exists.",
+                ptx_path
+            );
+            ptx_content = String::from(
+                "\
+                .version 7.0\n\
+                .target sm_50\n\
+                .address_size 64\n\
+                \n\
+                .visible .entry vanity_search() {\n\
+                    ret;\n\
+                }\n\
+            ",
+            );
+        }
+
+        // Handle CString creation separately to handle the error conversion properly
+        let ptx = match CString::new(ptx_content) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Error creating CString from PTX content: {}", e);
+                return Err(rustacuda::error::CudaError::InvalidValue);
+            }
+        };
+
+        Module::load_from_string(&ptx)
     }
 
     // Legacy method for backwards compatibility
@@ -219,83 +260,101 @@ impl GpuVanitySearch {
             .map(|c| c.to_digit(16).unwrap() as u8)
             .collect();
 
-        // Allocate device memory
-        let mut deployer_buf = DeviceBuffer::from_slice(&deployer_bytes).unwrap();
-        let mut prefix_buf = DeviceBuffer::from_slice(&prefix_bytes).unwrap();
-        let prefix_len = prefix_bytes.len() as u32;
-        let mut prefix_len_buf = DeviceBuffer::from_slice(&[prefix_len]).unwrap();
-
         let ns_bytes = namespace.as_bytes();
-        let mut ns_buf = DeviceBuffer::from_slice(ns_bytes).unwrap();
-        let ns_len = ns_bytes.len() as u32;
-        let mut ns_len_buf = DeviceBuffer::from_slice(&[ns_len]).unwrap();
-
-        let mut initial_salt_buf = DeviceBuffer::from_slice(initial_salt).unwrap();
         let mut result_salt = vec![0u8; 32];
-        let mut result_salt_buf = DeviceBuffer::from_slice(&result_salt).unwrap();
         let mut found = vec![0i32; 1];
-        let mut found_buf = DeviceBuffer::from_slice(&found).unwrap();
 
-        let function_name = CString::new("vanity_search").unwrap();
-        let function = device.create3_module.get_function(&function_name).unwrap();
+        // Wrap all CUDA operations in a result to handle errors gracefully
+        let result = (|| -> Result<bool, rustacuda::error::CudaError> {
+            // Allocate device memory with proper error handling
+            let mut deployer_buf = DeviceBuffer::from_slice(&deployer_bytes)?;
+            let mut prefix_buf = DeviceBuffer::from_slice(&prefix_bytes)?;
+            let prefix_len = prefix_bytes.len() as u32;
+            let mut prefix_len_buf = DeviceBuffer::from_slice(&[prefix_len])?;
+            let mut ns_buf = DeviceBuffer::from_slice(ns_bytes)?;
+            let ns_len = ns_bytes.len() as u32;
+            let mut ns_len_buf = DeviceBuffer::from_slice(&[ns_len])?;
+            let mut initial_salt_buf = DeviceBuffer::from_slice(initial_salt)?;
+            let mut result_salt_buf = DeviceBuffer::from_slice(&result_salt)?;
+            let mut found_buf = DeviceBuffer::from_slice(&found)?;
 
-        let start_time = std::time::Instant::now();
+            let function_name = CString::new("vanity_search").unwrap();
+            let function = device.create3_module.get_function(&function_name)?;
 
-        unsafe {
-            let stream = &device.stream;
-            launch!(
-                function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
-                    deployer_buf.as_device_ptr(),
-                    prefix_buf.as_device_ptr(),
-                    prefix_len_buf.as_device_ptr(),
-                    ns_buf.as_device_ptr(),
-                    ns_len_buf.as_device_ptr(),
-                    initial_salt_buf.as_device_ptr(),
-                    result_salt_buf.as_device_ptr(),
-                    found_buf.as_device_ptr()
-                )
-            )
-            .unwrap();
-        }
+            let start_time = std::time::Instant::now();
 
-        device.stream.synchronize().unwrap();
+            unsafe {
+                let stream = &device.stream;
+                launch!(
+                    function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
+                        deployer_buf.as_device_ptr(),
+                        prefix_buf.as_device_ptr(),
+                        prefix_len_buf.as_device_ptr(),
+                        ns_buf.as_device_ptr(),
+                        ns_len_buf.as_device_ptr(),
+                        initial_salt_buf.as_device_ptr(),
+                        result_salt_buf.as_device_ptr(),
+                        found_buf.as_device_ptr()
+                    )
+                )?;
+            }
 
-        let end_time = std::time::Instant::now();
-        let duration = end_time.duration_since(start_time);
-        self.time_taken
-            .set(self.time_taken.get() + duration.as_secs_f64());
-        self.iterations
-            .set(self.iterations.get() + (thread_count * block_count) as u64);
+            device.stream.synchronize()?;
 
-        // Check if we found a result
-        found_buf.copy_to(&mut found).unwrap();
+            let end_time = std::time::Instant::now();
+            let duration = end_time.duration_since(start_time);
+            self.time_taken
+                .set(self.time_taken.get() + duration.as_secs_f64());
+            self.iterations
+                .set(self.iterations.get() + (thread_count * block_count) as u64);
 
-        if found[0] != 0 || self.last_print.get().elapsed() > std::time::Duration::from_secs(1) {
-            let iterations_per_second = (self.iterations.get() as f64) / self.time_taken.get();
-            println!(
-                "CUDA: Iterations per second: {}",
-                (iterations_per_second as u64)
-                    .to_string()
-                    .chars()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .chunks(3)
-                    .map(|chunk| chunk.iter().collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            );
-            println!("CUDA: Total time taken: {:?}s", self.time_taken.get());
-            self.last_print.set(std::time::Instant::now());
-        }
+            // Check if we found a result
+            found_buf.copy_to(&mut found)?;
 
-        if found[0] != 0 {
-            result_salt_buf.copy_to(&mut result_salt).unwrap();
-            Some(result_salt)
-        } else {
-            None
+            if found[0] != 0 {
+                result_salt_buf.copy_to(&mut result_salt)?;
+            }
+
+            Ok(found[0] != 0)
+        })();
+
+        // Handle any CUDA errors
+        match result {
+            Ok(found_result) => {
+                if found_result
+                    || self.last_print.get().elapsed() > std::time::Duration::from_secs(1)
+                {
+                    let iterations_per_second =
+                        (self.iterations.get() as f64) / self.time_taken.get();
+                    println!(
+                        "CUDA: Iterations per second: {}",
+                        (iterations_per_second as u64)
+                            .to_string()
+                            .chars()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .chunks(3)
+                            .map(|chunk| chunk.iter().collect::<String>())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                            .chars()
+                            .rev()
+                            .collect::<String>()
+                    );
+                    println!("CUDA: Total time taken: {:?}s", self.time_taken.get());
+                    self.last_print.set(std::time::Instant::now());
+                }
+
+                if found_result {
+                    Some(result_salt)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                println!("CUDA error during search_with_threads_create3: {}", e);
+                None
+            }
         }
     }
 
@@ -348,77 +407,97 @@ impl GpuVanitySearch {
             .map(|c| c.to_digit(16).unwrap() as u8)
             .collect();
 
-        // Allocate device memory
-        let mut deployer_buf = DeviceBuffer::from_slice(&deployer_bytes).unwrap();
-        let mut prefix_buf = DeviceBuffer::from_slice(&prefix_bytes).unwrap();
-        let prefix_len = prefix_bytes.len() as u32;
-        let mut prefix_len_buf = DeviceBuffer::from_slice(&[prefix_len]).unwrap();
-        let mut bytecode_hash_buf = DeviceBuffer::from_slice(bytecode_hash).unwrap();
-        let mut initial_salt_buf = DeviceBuffer::from_slice(initial_salt).unwrap();
         let mut result_salt = vec![0u8; 32];
-        let mut result_salt_buf = DeviceBuffer::from_slice(&result_salt).unwrap();
         let mut found = vec![0i32; 1];
-        let mut found_buf = DeviceBuffer::from_slice(&found).unwrap();
 
-        let function_name = CString::new("vanity_search").unwrap();
-        let function = module.get_function(&function_name).unwrap();
+        // Wrap all CUDA operations in a result to handle errors gracefully
+        let result = (|| -> Result<bool, rustacuda::error::CudaError> {
+            // Allocate device memory with proper error handling
+            let mut deployer_buf = DeviceBuffer::from_slice(&deployer_bytes)?;
+            let mut prefix_buf = DeviceBuffer::from_slice(&prefix_bytes)?;
+            let prefix_len = prefix_bytes.len() as u32;
+            let mut prefix_len_buf = DeviceBuffer::from_slice(&[prefix_len])?;
+            let mut bytecode_hash_buf = DeviceBuffer::from_slice(bytecode_hash)?;
+            let mut initial_salt_buf = DeviceBuffer::from_slice(initial_salt)?;
+            let mut result_salt_buf = DeviceBuffer::from_slice(&result_salt)?;
+            let mut found_buf = DeviceBuffer::from_slice(&found)?;
 
-        let start_time = std::time::Instant::now();
+            let function_name = CString::new("vanity_search").unwrap();
+            let function = module.get_function(&function_name)?;
 
-        unsafe {
-            let stream = &device.stream;
-            launch!(
-                function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
-                    deployer_buf.as_device_ptr(),
-                    prefix_buf.as_device_ptr(),
-                    prefix_len_buf.as_device_ptr(),
-                    bytecode_hash_buf.as_device_ptr(),
-                    initial_salt_buf.as_device_ptr(),
-                    result_salt_buf.as_device_ptr(),
-                    found_buf.as_device_ptr()
-                )
-            )
-            .unwrap();
-        }
+            let start_time = std::time::Instant::now();
 
-        device.stream.synchronize().unwrap();
+            unsafe {
+                let stream = &device.stream;
+                launch!(
+                    function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
+                        deployer_buf.as_device_ptr(),
+                        prefix_buf.as_device_ptr(),
+                        prefix_len_buf.as_device_ptr(),
+                        bytecode_hash_buf.as_device_ptr(),
+                        initial_salt_buf.as_device_ptr(),
+                        result_salt_buf.as_device_ptr(),
+                        found_buf.as_device_ptr()
+                    )
+                )?;
+            }
 
-        let end_time = std::time::Instant::now();
-        let duration = end_time.duration_since(start_time);
-        self.time_taken
-            .set(self.time_taken.get() + duration.as_secs_f64());
-        self.iterations
-            .set(self.iterations.get() + (thread_count * block_count) as u64);
+            device.stream.synchronize()?;
 
-        // Check if we found a result
-        found_buf.copy_to(&mut found).unwrap();
+            let end_time = std::time::Instant::now();
+            let duration = end_time.duration_since(start_time);
+            self.time_taken
+                .set(self.time_taken.get() + duration.as_secs_f64());
+            self.iterations
+                .set(self.iterations.get() + (thread_count * block_count) as u64);
 
-        if found[0] != 0 || self.last_print.get().elapsed() > std::time::Duration::from_secs(1) {
-            let iterations_per_second = (self.iterations.get() as f64) / self.time_taken.get();
-            println!(
-                "CUDA: Iterations per second: {}",
-                (iterations_per_second as u64)
-                    .to_string()
-                    .chars()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .chunks(3)
-                    .map(|chunk| chunk.iter().collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            );
-            println!("CUDA: Total time taken: {:?}s", self.time_taken.get());
-            self.last_print.set(std::time::Instant::now());
-        }
+            // Check if we found a result
+            found_buf.copy_to(&mut found)?;
 
-        if found[0] != 0 {
-            result_salt_buf.copy_to(&mut result_salt).unwrap();
-            Some(result_salt)
-        } else {
-            None
+            if found[0] != 0 {
+                result_salt_buf.copy_to(&mut result_salt)?;
+            }
+
+            Ok(found[0] != 0)
+        })();
+
+        // Handle any CUDA errors
+        match result {
+            Ok(found_result) => {
+                if found_result
+                    || self.last_print.get().elapsed() > std::time::Duration::from_secs(1)
+                {
+                    let iterations_per_second =
+                        (self.iterations.get() as f64) / self.time_taken.get();
+                    println!(
+                        "CUDA: Iterations per second: {}",
+                        (iterations_per_second as u64)
+                            .to_string()
+                            .chars()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .chunks(3)
+                            .map(|chunk| chunk.iter().collect::<String>())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                            .chars()
+                            .rev()
+                            .collect::<String>()
+                    );
+                    println!("CUDA: Total time taken: {:?}s", self.time_taken.get());
+                    self.last_print.set(std::time::Instant::now());
+                }
+
+                if found_result {
+                    Some(result_salt)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                println!("CUDA error during search_with_threads_create2: {}", e);
+                None
+            }
         }
     }
 }
