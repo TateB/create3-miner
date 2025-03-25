@@ -1,3 +1,4 @@
+use rustacuda::context::{Context, ContextFlags, ContextStack, CurrentContext};
 use rustacuda::launch;
 use rustacuda::memory::DeviceBuffer;
 use rustacuda::prelude::*;
@@ -11,6 +12,7 @@ pub struct GpuDevice {
     device_id: u32,
     device_name: String,
     resources: Mutex<DeviceResources>,
+    context: Context, // Each device has its own context
 }
 
 // Resources that must be accessed under a mutex
@@ -55,17 +57,7 @@ impl GpuVanitySearch {
 
         println!("Found {} CUDA device(s)", device_count);
 
-        // Create a CUDA context - we'll use a single context for all operations
-        let context = match Context::create_and_push(
-            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
-            Device::get_device(0).unwrap(),
-        ) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                println!("Failed to create CUDA context: {}", e);
-                return None;
-            }
-        };
+        // We no longer create a single context here for all devices
 
         let mut devices = Vec::with_capacity(device_count as usize);
 
@@ -109,6 +101,21 @@ impl GpuVanitySearch {
         let device_name = device.name().unwrap_or_default();
         println!("Initializing CUDA device {}: {}", device_id, device_name);
 
+        // Create a context for this specific device
+        let context = match Context::create_and_push(
+            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
+            device,
+        ) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                println!(
+                    "Failed to create CUDA context for device {}: {}",
+                    device_id, e
+                );
+                return None;
+            }
+        };
+
         // Create a stream
         let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) {
             Ok(stream) => stream,
@@ -117,6 +124,7 @@ impl GpuVanitySearch {
                     "Failed to create CUDA stream for device {}: {}",
                     device_id, e
                 );
+                // Context will be automatically popped when it goes out of scope
                 return None;
             }
         };
@@ -137,6 +145,7 @@ impl GpuVanitySearch {
                     "Failed to load CREATE3 CUDA module for device {}: {}",
                     device_id, e
                 );
+                // Context will be automatically popped when it goes out of scope
                 return None;
             }
         };
@@ -171,10 +180,20 @@ impl GpuVanitySearch {
             stream,
         };
 
+        // Pop the context from the stack - it's still owned by the context variable
+        match ContextStack::pop() {
+            Ok(_) => (),
+            Err(e) => {
+                println!("Warning: Failed to pop context: {}", e);
+                // Continue anyway since the context is owned by the context variable
+            }
+        }
+
         Some(GpuDevice {
             device_id,
             device_name,
             resources: Mutex::new(resources),
+            context,
         })
     }
 
@@ -236,6 +255,12 @@ impl GpuVanitySearch {
             "Using CUDA device {}: {}",
             device.device_id, device.device_name
         );
+
+        // Set this device's context as the current context
+        if let Err(e) = CurrentContext::set_current(&device.context) {
+            println!("Failed to set device context: {}", e);
+            return None;
+        }
 
         // Convert deployer address to bytes
         let deployer_bytes = if deployer.len() == 20 {
@@ -390,6 +415,12 @@ impl GpuVanitySearch {
             "Using CUDA device {}: {}",
             device.device_id, device.device_name
         );
+
+        // Set this device's context as the current context
+        if let Err(e) = CurrentContext::set_current(&device.context) {
+            println!("Failed to set device context: {}", e);
+            return None;
+        }
 
         // Lock the device resources
         let resources_guard = match device.resources.lock() {
@@ -551,6 +582,7 @@ impl Drop for GpuVanitySearch {
             }
         }
 
+        // Context cleanup happens automatically when the Context is dropped
         // Clear the devices vector to ensure all resources are dropped
         self.devices.clear();
     }
