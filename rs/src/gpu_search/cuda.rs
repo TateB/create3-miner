@@ -5,14 +5,19 @@ use std::cell::Cell;
 use std::ffi::CString;
 use std::sync::Arc;
 
-pub struct GpuVanitySearch {
-    _context: Arc<Context>, // Underscore prefix indicates intentionally unused but necessary field
+pub struct GpuDevice {
+    _context: Arc<Context>,
+    stream: Stream,
     create3_module: Module,
     create2_module: Option<Module>,
-    stream: Stream,
+}
+
+pub struct GpuVanitySearch {
+    devices: Vec<GpuDevice>,
     iterations: Cell<u64>,
     time_taken: Cell<f64>,
     last_print: Cell<std::time::Instant>,
+    current_device: Cell<usize>,
 }
 
 impl GpuVanitySearch {
@@ -25,15 +30,64 @@ impl GpuVanitySearch {
             }
         }
 
-        let device = match Device::get_device(0) {
-            Ok(device) => device,
+        // Get device count
+        let device_count = match Device::num_devices() {
+            Ok(count) => count,
             Err(e) => {
-                println!("Failed to get CUDA device: {}", e);
+                println!("Failed to get CUDA device count: {}", e);
                 return None;
             }
         };
 
-        println!("Found CUDA device: {}", device.name().unwrap());
+        if device_count == 0 {
+            println!("No CUDA devices found");
+            return None;
+        }
+
+        println!("Found {} CUDA device(s)", device_count);
+
+        let mut devices = Vec::with_capacity(device_count as usize);
+
+        for device_id in 0..device_count {
+            match Self::initialize_device(device_id) {
+                Some(device) => devices.push(device),
+                None => println!("Warning: Failed to initialize CUDA device {}", device_id),
+            }
+        }
+
+        if devices.is_empty() {
+            println!("Failed to initialize any CUDA devices");
+            return None;
+        }
+
+        println!(
+            "Successfully initialized {} CUDA GPU device(s)",
+            devices.len()
+        );
+
+        Some(Self {
+            devices,
+            iterations: Cell::new(0),
+            time_taken: Cell::new(0.0),
+            last_print: Cell::new(std::time::Instant::now()),
+            current_device: Cell::new(0),
+        })
+    }
+
+    fn initialize_device(device_id: u32) -> Option<GpuDevice> {
+        let device = match Device::get_device(device_id) {
+            Ok(device) => device,
+            Err(e) => {
+                println!("Failed to get CUDA device {}: {}", device_id, e);
+                return None;
+            }
+        };
+
+        println!(
+            "Initializing CUDA device {}: {}",
+            device_id,
+            device.name().unwrap_or_default()
+        );
 
         let context = match Context::create_and_push(
             ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
@@ -41,7 +95,10 @@ impl GpuVanitySearch {
         ) {
             Ok(ctx) => Arc::new(ctx),
             Err(e) => {
-                println!("Failed to create CUDA context: {}", e);
+                println!(
+                    "Failed to create CUDA context for device {}: {}",
+                    device_id, e
+                );
                 return None;
             }
         };
@@ -52,7 +109,10 @@ impl GpuVanitySearch {
         let create3_module = match Module::load_from_string(&create3_ptx) {
             Ok(module) => module,
             Err(e) => {
-                println!("Failed to load CREATE3 CUDA module: {}", e);
+                println!(
+                    "Failed to load CREATE3 CUDA module for device {}: {}",
+                    device_id, e
+                );
                 return None;
             }
         };
@@ -63,12 +123,21 @@ impl GpuVanitySearch {
             let create2_ptx = CString::new(create2_ptx).unwrap();
             match Module::load_from_string(&create2_ptx) {
                 Ok(module) => {
-                    println!("Successfully loaded CREATE2 CUDA module");
+                    println!(
+                        "Successfully loaded CREATE2 CUDA module for device {}",
+                        device_id
+                    );
                     Some(module)
                 }
                 Err(e) => {
-                    println!("Warning: Failed to load CREATE2 CUDA module: {}", e);
-                    println!("CREATE2 functionality will not be available");
+                    println!(
+                        "Warning: Failed to load CREATE2 CUDA module for device {}: {}",
+                        device_id, e
+                    );
+                    println!(
+                        "CREATE2 functionality will not be available on device {}",
+                        device_id
+                    );
                     None
                 }
             }
@@ -77,21 +146,19 @@ impl GpuVanitySearch {
         let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) {
             Ok(stream) => stream,
             Err(e) => {
-                println!("Failed to create CUDA stream: {}", e);
+                println!(
+                    "Failed to create CUDA stream for device {}: {}",
+                    device_id, e
+                );
                 return None;
             }
         };
 
-        println!("Successfully initialized CUDA GPU support");
-
-        Some(Self {
+        Some(GpuDevice {
             _context: context,
+            stream,
             create3_module,
             create2_module,
-            stream,
-            iterations: Cell::new(0),
-            time_taken: Cell::new(0.0),
-            last_print: Cell::new(std::time::Instant::now()),
         })
     }
 
@@ -124,6 +191,17 @@ impl GpuVanitySearch {
         thread_count: u32,
         block_count: u32,
     ) -> Option<Vec<u8>> {
+        if self.devices.is_empty() {
+            return None;
+        }
+
+        // Round-robin between devices for load balancing
+        let current = self.current_device.get();
+        let next = (current + 1) % self.devices.len();
+        self.current_device.set(next);
+
+        let device = &self.devices[current];
+
         // Convert deployer address to bytes
         let deployer_bytes = if deployer.len() == 20 {
             deployer.to_vec()
@@ -159,12 +237,12 @@ impl GpuVanitySearch {
         let mut found_buf = DeviceBuffer::from_slice(&found).unwrap();
 
         let function_name = CString::new("vanity_search").unwrap();
-        let function = self.create3_module.get_function(&function_name).unwrap();
+        let function = device.create3_module.get_function(&function_name).unwrap();
 
         let start_time = std::time::Instant::now();
 
         unsafe {
-            let stream = &self.stream;
+            let stream = &device.stream;
             launch!(
                 function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
                     deployer_buf.as_device_ptr(),
@@ -180,7 +258,7 @@ impl GpuVanitySearch {
             .unwrap();
         }
 
-        self.stream.synchronize().unwrap();
+        device.stream.synchronize().unwrap();
 
         let end_time = std::time::Instant::now();
         let duration = end_time.duration_since(start_time);
@@ -230,11 +308,25 @@ impl GpuVanitySearch {
         thread_count: u32,
         block_count: u32,
     ) -> Option<Vec<u8>> {
-        // Check if CREATE2 module is available
-        let module = match &self.create2_module {
+        if self.devices.is_empty() {
+            return None;
+        }
+
+        // Round-robin between devices for load balancing
+        let current = self.current_device.get();
+        let next = (current + 1) % self.devices.len();
+        self.current_device.set(next);
+
+        let device = &self.devices[current];
+
+        // Check if CREATE2 module is available for this device
+        let module = match &device.create2_module {
             Some(module) => module,
             None => {
-                println!("CREATE2 CUDA module not available. Please compile CREATE2.ptx");
+                println!(
+                    "CREATE2 CUDA module not available for device {}. Please compile CREATE2.ptx",
+                    current
+                );
                 return None;
             }
         };
@@ -274,7 +366,7 @@ impl GpuVanitySearch {
         let start_time = std::time::Instant::now();
 
         unsafe {
-            let stream = &self.stream;
+            let stream = &device.stream;
             launch!(
                 function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
                     deployer_buf.as_device_ptr(),
@@ -289,7 +381,7 @@ impl GpuVanitySearch {
             .unwrap();
         }
 
-        self.stream.synchronize().unwrap();
+        device.stream.synchronize().unwrap();
 
         let end_time = std::time::Instant::now();
         let duration = end_time.duration_since(start_time);
@@ -333,24 +425,34 @@ impl GpuVanitySearch {
 
 impl Drop for GpuVanitySearch {
     fn drop(&mut self) {
-        // First synchronize the stream
-        if let Err(e) = self.stream.synchronize() {
-            println!("Warning: Failed to synchronize CUDA stream: {}", e);
-        }
+        // Clean up all devices
+        for (i, device) in self.devices.iter_mut().enumerate() {
+            println!("Cleaning up CUDA device {}", i);
 
-        // Create a new scope to ensure all CUDA resources are dropped before the context
-        {
-            // Drop the stream first
-            let _ = std::mem::replace(&mut self.stream, unsafe { std::mem::zeroed() });
+            // First synchronize the stream
+            if let Err(e) = device.stream.synchronize() {
+                println!(
+                    "Warning: Failed to synchronize CUDA stream for device {}: {}",
+                    i, e
+                );
+            }
 
-            // Drop the modules
-            let _ = std::mem::replace(&mut self.create3_module, unsafe { std::mem::zeroed() });
-            if self.create2_module.is_some() {
-                let _ = std::mem::replace(&mut self.create2_module, None);
+            // Create a new scope to ensure all CUDA resources are dropped before the context
+            {
+                // Drop the stream first
+                let _ = std::mem::replace(&mut device.stream, unsafe { std::mem::zeroed() });
+
+                // Drop the modules
+                let _ =
+                    std::mem::replace(&mut device.create3_module, unsafe { std::mem::zeroed() });
+                if device.create2_module.is_some() {
+                    let _ = std::mem::replace(&mut device.create2_module, None);
+                }
             }
         }
 
-        // The context will be dropped last automatically
+        // Clear the devices vector to ensure all resources are dropped
+        self.devices.clear();
     }
 }
 
@@ -463,8 +565,8 @@ mod tests {
     fn test_cuda_create2_basic() {
         let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
 
-        if gpu.create2_module.is_none() {
-            println!("Skipping CREATE2 test as module is not available");
+        if gpu.devices.is_empty() || gpu.devices.iter().all(|d| d.create2_module.is_none()) {
+            println!("Skipping CREATE2 test as module is not available on any device");
             return;
         }
 
