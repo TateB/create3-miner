@@ -3,20 +3,28 @@ use rustacuda::memory::DeviceBuffer;
 use rustacuda::prelude::*;
 use std::cell::Cell;
 use std::ffi::CString;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+// A thread-safe wrapper for a device's resources
 pub struct GpuDevice {
     device_id: u32,
-    stream: Stream,
+    device_name: String,
+    context_and_resources: Mutex<DeviceResources>,
+}
+
+// Resources that must be accessed under a mutex
+struct DeviceResources {
     create3_module: Module,
     create2_module: Option<Module>,
+    stream: Stream,
 }
 
 pub struct GpuVanitySearch {
     devices: Vec<GpuDevice>,
     iterations: Cell<u64>,
     time_taken: Cell<f64>,
-    last_print: Cell<std::time::Instant>,
+    last_print: Cell<Instant>,
     current_device: Cell<usize>,
 }
 
@@ -69,12 +77,13 @@ impl GpuVanitySearch {
             devices,
             iterations: Cell::new(0),
             time_taken: Cell::new(0.0),
-            last_print: Cell::new(std::time::Instant::now()),
+            last_print: Cell::new(Instant::now()),
             current_device: Cell::new(0),
         })
     }
 
     fn initialize_device(device_id: u32) -> Option<GpuDevice> {
+        // Get device
         let device = match Device::get_device(device_id) {
             Ok(device) => device,
             Err(e) => {
@@ -83,12 +92,11 @@ impl GpuVanitySearch {
             }
         };
 
-        println!(
-            "Initializing CUDA device {}: {}",
-            device_id,
-            device.name().unwrap_or_default()
-        );
+        // Get device name for better logging
+        let device_name = device.name().unwrap_or_default();
+        println!("Initializing CUDA device {}: {}", device_id, device_name);
 
+        // Create a primary context for this device
         let context = match Context::create_and_push(
             ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
             device,
@@ -103,7 +111,20 @@ impl GpuVanitySearch {
             }
         };
 
-        // Load the CREATE3 CUDA module from the embedded PTX or from a file
+        // Create a stream
+        let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) {
+            Ok(stream) => stream,
+            Err(e) => {
+                println!(
+                    "Failed to create CUDA stream for device {}: {}",
+                    device_id, e
+                );
+                // Context will be popped in drop
+                return None;
+            }
+        };
+
+        // Load the CREATE3 CUDA module
         let create3_module = match Self::load_ptx_module("CREATE3.ptx", device_id) {
             Ok(module) => module,
             Err(e) => {
@@ -111,11 +132,12 @@ impl GpuVanitySearch {
                     "Failed to load CREATE3 CUDA module for device {}: {}",
                     device_id, e
                 );
+                // Stream and context will be dropped and popped automatically
                 return None;
             }
         };
 
-        // Try to load the CREATE2 CUDA module (compiled PTX)
+        // Try to load the CREATE2 CUDA module
         let create2_module = match Self::load_ptx_module("CREATE2.ptx", device_id) {
             Ok(module) => {
                 println!(
@@ -137,22 +159,20 @@ impl GpuVanitySearch {
             }
         };
 
-        let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) {
-            Ok(stream) => stream,
-            Err(e) => {
-                println!(
-                    "Failed to create CUDA stream for device {}: {}",
-                    device_id, e
-                );
-                return None;
-            }
+        // Create device resources
+        let resources = DeviceResources {
+            create3_module,
+            create2_module,
+            stream,
         };
+
+        // Pop context - we'll push it back when needed
+        Context::pop().expect("Failed to pop context");
 
         Some(GpuDevice {
             device_id,
-            stream,
-            create3_module,
-            create2_module,
+            device_name,
+            context_and_resources: Mutex::new(resources),
         })
     }
 
@@ -264,6 +284,45 @@ impl GpuVanitySearch {
         let mut result_salt = vec![0u8; 32];
         let mut found = vec![0i32; 1];
 
+        // Lock the device resources to ensure no other thread can use this device's context
+        let resources_guard = match device.context_and_resources.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                println!("Failed to lock device resources: {}", e);
+                return None;
+            }
+        };
+
+        // Set up the device context for this operation
+        let device_instance = match Device::get_device(device.device_id) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("Error getting device {}: {}", device.device_id, e);
+                return None;
+            }
+        };
+
+        // Create a new primary context for this operation
+        let context = match PrimaryContext::new(device_instance) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                println!(
+                    "Error creating primary context for device {}: {}",
+                    device.device_id, e
+                );
+                return None;
+            }
+        };
+
+        // Begin the primary context scope
+        let _context_guard = match context.begin() {
+            Ok(guard) => guard,
+            Err(e) => {
+                println!("Error beginning primary context: {}", e);
+                return None;
+            }
+        };
+
         // Wrap all CUDA operations in a result to handle errors gracefully
         let result = (|| -> Result<bool, rustacuda::error::CudaError> {
             // Allocate device memory with proper error handling
@@ -279,12 +338,14 @@ impl GpuVanitySearch {
             let mut found_buf = DeviceBuffer::from_slice(&found)?;
 
             let function_name = CString::new("vanity_search").unwrap();
-            let function = device.create3_module.get_function(&function_name)?;
+            let function = resources_guard
+                .create3_module
+                .get_function(&function_name)?;
 
-            let start_time = std::time::Instant::now();
+            let start_time = Instant::now();
 
             unsafe {
-                let stream = &device.stream;
+                let stream = &resources_guard.stream;
                 launch!(
                     function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
                         deployer_buf.as_device_ptr(),
@@ -299,9 +360,9 @@ impl GpuVanitySearch {
                 )?;
             }
 
-            device.stream.synchronize()?;
+            resources_guard.stream.synchronize()?;
 
-            let end_time = std::time::Instant::now();
+            let end_time = Instant::now();
             let duration = end_time.duration_since(start_time);
             self.time_taken
                 .set(self.time_taken.get() + duration.as_secs_f64());
@@ -317,6 +378,8 @@ impl GpuVanitySearch {
 
             Ok(found[0] != 0)
         })();
+
+        // Context guard and resources guard will be dropped here
 
         // Handle any CUDA errors
         match result {
@@ -342,7 +405,7 @@ impl GpuVanitySearch {
                             .collect::<String>()
                     );
                     println!("CUDA: Total time taken: {:?}s", self.time_taken.get());
-                    self.last_print.set(std::time::Instant::now());
+                    self.last_print.set(Instant::now());
                 }
 
                 if found_result {
@@ -378,8 +441,17 @@ impl GpuVanitySearch {
 
         let device = &self.devices[current];
 
+        // Lock the device resources to ensure no other thread can use this device's context
+        let resources_guard = match device.context_and_resources.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                println!("Failed to lock device resources: {}", e);
+                return None;
+            }
+        };
+
         // Check if CREATE2 module is available for this device
-        let module = match &device.create2_module {
+        let module = match &resources_guard.create2_module {
             Some(module) => module,
             None => {
                 println!(
@@ -410,6 +482,36 @@ impl GpuVanitySearch {
         let mut result_salt = vec![0u8; 32];
         let mut found = vec![0i32; 1];
 
+        // Set up the device context for this operation
+        let device_instance = match Device::get_device(device.device_id) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("Error getting device {}: {}", device.device_id, e);
+                return None;
+            }
+        };
+
+        // Create a new primary context for this operation
+        let context = match PrimaryContext::new(device_instance) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                println!(
+                    "Error creating primary context for device {}: {}",
+                    device.device_id, e
+                );
+                return None;
+            }
+        };
+
+        // Begin the primary context scope
+        let _context_guard = match context.begin() {
+            Ok(guard) => guard,
+            Err(e) => {
+                println!("Error beginning primary context: {}", e);
+                return None;
+            }
+        };
+
         // Wrap all CUDA operations in a result to handle errors gracefully
         let result = (|| -> Result<bool, rustacuda::error::CudaError> {
             // Allocate device memory with proper error handling
@@ -425,10 +527,10 @@ impl GpuVanitySearch {
             let function_name = CString::new("vanity_search").unwrap();
             let function = module.get_function(&function_name)?;
 
-            let start_time = std::time::Instant::now();
+            let start_time = Instant::now();
 
             unsafe {
-                let stream = &device.stream;
+                let stream = &resources_guard.stream;
                 launch!(
                     function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
                         deployer_buf.as_device_ptr(),
@@ -442,9 +544,9 @@ impl GpuVanitySearch {
                 )?;
             }
 
-            device.stream.synchronize()?;
+            resources_guard.stream.synchronize()?;
 
-            let end_time = std::time::Instant::now();
+            let end_time = Instant::now();
             let duration = end_time.duration_since(start_time);
             self.time_taken
                 .set(self.time_taken.get() + duration.as_secs_f64());
@@ -460,6 +562,8 @@ impl GpuVanitySearch {
 
             Ok(found[0] != 0)
         })();
+
+        // Context guard and resources guard will be dropped here
 
         // Handle any CUDA errors
         match result {
@@ -485,7 +589,7 @@ impl GpuVanitySearch {
                             .collect::<String>()
                     );
                     println!("CUDA: Total time taken: {:?}s", self.time_taken.get());
-                    self.last_print.set(std::time::Instant::now());
+                    self.last_print.set(Instant::now());
                 }
 
                 if found_result {
@@ -505,28 +609,27 @@ impl GpuVanitySearch {
 impl Drop for GpuVanitySearch {
     fn drop(&mut self) {
         // Clean up all devices
-        for (i, device) in self.devices.iter_mut().enumerate() {
-            println!("Cleaning up CUDA device {}", i);
+        for (i, device) in self.devices.iter().enumerate() {
+            println!("Cleaning up CUDA device {}: {}", i, device.device_name);
 
-            // First synchronize the stream
-            if let Err(e) = device.stream.synchronize() {
-                println!(
-                    "Warning: Failed to synchronize CUDA stream for device {}: {}",
-                    i, e
-                );
-            }
-
-            // Create a new scope to ensure all CUDA resources are dropped before the context
-            {
-                // Drop the stream first
-                let _ = std::mem::replace(&mut device.stream, unsafe { std::mem::zeroed() });
-
-                // Drop the modules
-                let _ =
-                    std::mem::replace(&mut device.create3_module, unsafe { std::mem::zeroed() });
-                if device.create2_module.is_some() {
-                    let _ = std::mem::replace(&mut device.create2_module, None);
+            // We'll try to lock the resources for cleanup, but if we can't, we'll just log and continue
+            if let Ok(mut resources) = device.context_and_resources.lock() {
+                // First synchronize the stream
+                if let Err(e) = resources.stream.synchronize() {
+                    println!(
+                        "Warning: Failed to synchronize CUDA stream for device {}: {}",
+                        i, e
+                    );
                 }
+
+                // Explicitly drop resources
+                resources.create3_module = unsafe { std::mem::zeroed() };
+                if resources.create2_module.is_some() {
+                    resources.create2_module = None;
+                }
+                resources.stream = unsafe { std::mem::zeroed() };
+            } else {
+                println!("Warning: Could not lock device {} resources for cleanup", i);
             }
         }
 
@@ -644,7 +747,15 @@ mod tests {
     fn test_cuda_create2_basic() {
         let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
 
-        if gpu.devices.is_empty() || gpu.devices.iter().all(|d| d.create2_module.is_none()) {
+        if gpu.devices.is_empty()
+            || gpu.devices.iter().all(|d| {
+                d.context_and_resources
+                    .lock()
+                    .unwrap()
+                    .create2_module
+                    .is_none()
+            })
+        {
             println!("Skipping CREATE2 test as module is not available on any device");
             return;
         }
