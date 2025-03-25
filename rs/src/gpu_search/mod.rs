@@ -114,20 +114,16 @@ impl GpuVanitySearch {
     ) -> Option<Vec<u8>> {
         match self.backend {
             #[cfg(feature = "cuda")]
-            GpuBackend::Cuda => {
-                let threads = threads.unwrap_or(256);
-                let thread_groups = thread_groups.unwrap_or(65536);
-                self.cuda_search.as_ref().and_then(|cs| {
-                    cs.search_with_threads_create3(
-                        deployer,
-                        prefix,
-                        namespace,
-                        initial_salt,
-                        threads,
-                        thread_groups,
-                    )
-                })
-            }
+            GpuBackend::Cuda => self.cuda_search.as_ref().and_then(|cs| {
+                cs.search_with_threads_create3(
+                    deployer,
+                    prefix,
+                    namespace,
+                    initial_salt,
+                    threads,
+                    thread_groups,
+                )
+            }),
             #[cfg(feature = "metal")]
             GpuBackend::Metal => {
                 let threads = threads.unwrap_or(64);
@@ -160,20 +156,16 @@ impl GpuVanitySearch {
     ) -> Option<Vec<u8>> {
         match self.backend {
             #[cfg(feature = "cuda")]
-            GpuBackend::Cuda => {
-                let threads = threads.unwrap_or(256);
-                let thread_groups = thread_groups.unwrap_or(65536);
-                self.cuda_search.as_ref().and_then(|cs| {
-                    cs.search_with_threads_create2(
-                        deployer,
-                        prefix,
-                        bytecode_hash,
-                        initial_salt,
-                        threads,
-                        thread_groups,
-                    )
-                })
-            }
+            GpuBackend::Cuda => self.cuda_search.as_ref().and_then(|cs| {
+                cs.search_with_threads_create2(
+                    deployer,
+                    prefix,
+                    bytecode_hash,
+                    initial_salt,
+                    threads,
+                    thread_groups,
+                )
+            }),
             #[cfg(feature = "metal")]
             GpuBackend::Metal => {
                 let threads = threads.unwrap_or(64);

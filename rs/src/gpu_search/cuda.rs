@@ -6,11 +6,11 @@ use std::ffi::CString;
 use std::sync::Mutex;
 use std::time::Instant;
 
-// A thread-safe wrapper for a device's resources
+// A simple structure to hold device info and resources
 pub struct GpuDevice {
     device_id: u32,
     device_name: String,
-    context_and_resources: Mutex<DeviceResources>,
+    resources: Mutex<DeviceResources>,
 }
 
 // Resources that must be accessed under a mutex
@@ -30,6 +30,7 @@ pub struct GpuVanitySearch {
 
 impl GpuVanitySearch {
     pub fn new() -> Option<Self> {
+        // Initialize CUDA - this only needs to be done once
         match rustacuda::init(CudaFlags::empty()) {
             Ok(_) => (),
             Err(e) => {
@@ -53,6 +54,18 @@ impl GpuVanitySearch {
         }
 
         println!("Found {} CUDA device(s)", device_count);
+
+        // Create a CUDA context - we'll use a single context for all operations
+        let context = match Context::create_and_push(
+            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
+            Device::get_device(0).unwrap(),
+        ) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                println!("Failed to create CUDA context: {}", e);
+                return None;
+            }
+        };
 
         let mut devices = Vec::with_capacity(device_count as usize);
 
@@ -96,22 +109,6 @@ impl GpuVanitySearch {
         let device_name = device.name().unwrap_or_default();
         println!("Initializing CUDA device {}: {}", device_id, device_name);
 
-        // Create a context for this device
-        // This context needs to be pushed when in use and will be automatically popped when dropped
-        let _context = match Context::create_and_push(
-            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
-            device,
-        ) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                println!(
-                    "Failed to create CUDA context for device {}: {}",
-                    device_id, e
-                );
-                return None;
-            }
-        };
-
         // Create a stream
         let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) {
             Ok(stream) => stream,
@@ -120,26 +117,30 @@ impl GpuVanitySearch {
                     "Failed to create CUDA stream for device {}: {}",
                     device_id, e
                 );
-                // Context will be automatically popped when _context is dropped
                 return None;
             }
         };
 
-        // Load the CREATE3 CUDA module
-        let create3_module = match Self::load_ptx_module("CREATE3.ptx", device_id) {
-            Ok(module) => module,
+        // Load the CREATE3 CUDA module - required for basic functionality
+        let create3_module = match Self::load_ptx_module("CREATE3.ptx") {
+            Ok(module) => {
+                println!(
+                    "Successfully loaded CREATE3 CUDA module for device {}",
+                    device_id
+                );
+                module
+            }
             Err(e) => {
                 println!(
                     "Failed to load CREATE3 CUDA module for device {}: {}",
                     device_id, e
                 );
-                // Stream and context will be dropped automatically
                 return None;
             }
         };
 
-        // Try to load the CREATE2 CUDA module
-        let create2_module = match Self::load_ptx_module("CREATE2.ptx", device_id) {
+        // Try to load the CREATE2 CUDA module - optional feature
+        let create2_module = match Self::load_ptx_module("CREATE2.ptx") {
             Ok(module) => {
                 println!(
                     "Successfully loaded CREATE2 CUDA module for device {}",
@@ -167,60 +168,36 @@ impl GpuVanitySearch {
             stream,
         };
 
-        // _context will be dropped here and automatically popped
-
         Some(GpuDevice {
             device_id,
             device_name,
-            context_and_resources: Mutex::new(resources),
+            resources: Mutex::new(resources),
         })
     }
 
-    // Helper method to load a PTX module from file or embedded string
-    fn load_ptx_module(
-        ptx_name: &str,
-        device_id: u32,
-    ) -> Result<Module, rustacuda::error::CudaError> {
+    // Helper method to load a PTX module from file
+    fn load_ptx_module(ptx_name: &str) -> Result<Module, rustacuda::error::CudaError> {
         // First try to load from file system
         let ptx_path = format!("rs/src/shader/{}", ptx_name);
-        println!("Trying to load PTX from: {}", ptx_path);
+        println!("Loading PTX from: {}", ptx_path);
 
-        // Create a temp string to hold the PTX content
-        let ptx_content;
-
-        // Try loading from file
-        if let Ok(content) = std::fs::read_to_string(&ptx_path) {
-            ptx_content = content;
-        } else {
-            // If file loading fails, provide a dummy PTX with the error
-            // This is a workaround since we can't include the actual PTX files
-            println!(
-                "Could not load PTX file: {}. Please ensure the PTX file exists.",
-                ptx_path
-            );
-            ptx_content = String::from(
-                "\
-                .version 7.0\n\
-                .target sm_50\n\
-                .address_size 64\n\
-                \n\
-                .visible .entry vanity_search() {\n\
-                    ret;\n\
-                }\n\
-            ",
-            );
-        }
-
-        // Handle CString creation separately to handle the error conversion properly
-        let ptx = match CString::new(ptx_content) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("Error creating CString from PTX content: {}", e);
-                return Err(rustacuda::error::CudaError::InvalidValue);
+        // Try to read the file
+        match std::fs::read_to_string(&ptx_path) {
+            Ok(content) => {
+                // Convert to CString
+                match CString::new(content) {
+                    Ok(ptx) => Module::load_from_string(&ptx),
+                    Err(e) => {
+                        println!("Error creating CString from PTX content: {}", e);
+                        Err(rustacuda::error::CudaError::InvalidValue)
+                    }
+                }
             }
-        };
-
-        Module::load_from_string(&ptx)
+            Err(e) => {
+                println!("Error reading PTX file {}: {}", ptx_path, e);
+                Err(rustacuda::error::CudaError::FileNotFound)
+            }
+        }
     }
 
     // Legacy method for backwards compatibility
@@ -230,8 +207,8 @@ impl GpuVanitySearch {
         prefix: &str,
         namespace: &str,
         initial_salt: &[u8],
-        thread_count: u32,
-        block_count: u32,
+        thread_count: Option<u32>,
+        block_count: Option<u32>,
     ) -> Option<Vec<u8>> {
         self.search_with_threads_create3(
             deployer,
@@ -249,12 +226,16 @@ impl GpuVanitySearch {
         prefix: &str,
         namespace: &str,
         initial_salt: &[u8],
-        thread_count: u32,
-        block_count: u32,
+        thread_count: Option<u32>,
+        block_count: Option<u32>,
     ) -> Option<Vec<u8>> {
         if self.devices.is_empty() {
             return None;
         }
+
+        // Use provided thread/block counts or default values
+        let thread_count = thread_count.unwrap_or(256);
+        let block_count = block_count.unwrap_or(65536);
 
         // Round-robin between devices for load balancing
         let current = self.current_device.get();
@@ -262,6 +243,10 @@ impl GpuVanitySearch {
         self.current_device.set(next);
 
         let device = &self.devices[current];
+        println!(
+            "Using CUDA device {}: {}",
+            device.device_id, device.device_name
+        );
 
         // Convert deployer address to bytes
         let deployer_bytes = if deployer.len() == 20 {
@@ -284,8 +269,8 @@ impl GpuVanitySearch {
         let mut result_salt = vec![0u8; 32];
         let mut found = vec![0i32; 1];
 
-        // Lock the device resources to ensure no other thread can use this device's context
-        let resources_guard = match device.context_and_resources.lock() {
+        // Lock the device resources
+        let resources_guard = match device.resources.lock() {
             Ok(guard) => guard,
             Err(e) => {
                 println!("Failed to lock device resources: {}", e);
@@ -293,33 +278,9 @@ impl GpuVanitySearch {
             }
         };
 
-        // Get the device for creating a context
-        let device_instance = match Device::get_device(device.device_id) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("Error getting device {}: {}", device.device_id, e);
-                return None;
-            }
-        };
-
-        // Create a new context for this operation
-        let _context = match Context::create_and_push(
-            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
-            device_instance,
-        ) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                println!(
-                    "Error creating context for device {}: {}",
-                    device.device_id, e
-                );
-                return None;
-            }
-        };
-
         // Wrap all CUDA operations in a result to handle errors gracefully
         let result = (|| -> Result<bool, rustacuda::error::CudaError> {
-            // Allocate device memory with proper error handling
+            // Allocate device memory
             let mut deployer_buf = DeviceBuffer::from_slice(&deployer_bytes)?;
             let mut prefix_buf = DeviceBuffer::from_slice(&prefix_bytes)?;
             let prefix_len = prefix_bytes.len() as u32;
@@ -373,8 +334,6 @@ impl GpuVanitySearch {
             Ok(found[0] != 0)
         })();
 
-        // _context will be automatically dropped here, which pops the context
-
         // Handle any CUDA errors
         match result {
             Ok(found_result) => {
@@ -421,12 +380,16 @@ impl GpuVanitySearch {
         prefix: &str,
         bytecode_hash: &[u8],
         initial_salt: &[u8],
-        thread_count: u32,
-        block_count: u32,
+        thread_count: Option<u32>,
+        block_count: Option<u32>,
     ) -> Option<Vec<u8>> {
         if self.devices.is_empty() {
             return None;
         }
+
+        // Use provided thread/block counts or default values
+        let thread_count = thread_count.unwrap_or(256);
+        let block_count = block_count.unwrap_or(65536);
 
         // Round-robin between devices for load balancing
         let current = self.current_device.get();
@@ -434,9 +397,13 @@ impl GpuVanitySearch {
         self.current_device.set(next);
 
         let device = &self.devices[current];
+        println!(
+            "Using CUDA device {}: {}",
+            device.device_id, device.device_name
+        );
 
-        // Lock the device resources to ensure no other thread can use this device's context
-        let resources_guard = match device.context_and_resources.lock() {
+        // Lock the device resources
+        let resources_guard = match device.resources.lock() {
             Ok(guard) => guard,
             Err(e) => {
                 println!("Failed to lock device resources: {}", e);
@@ -475,30 +442,6 @@ impl GpuVanitySearch {
 
         let mut result_salt = vec![0u8; 32];
         let mut found = vec![0i32; 1];
-
-        // Get the device for creating a context
-        let device_instance = match Device::get_device(device.device_id) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("Error getting device {}: {}", device.device_id, e);
-                return None;
-            }
-        };
-
-        // Create a new context for this operation
-        let _context = match Context::create_and_push(
-            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
-            device_instance,
-        ) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                println!(
-                    "Error creating context for device {}: {}",
-                    device.device_id, e
-                );
-                return None;
-            }
-        };
 
         // Wrap all CUDA operations in a result to handle errors gracefully
         let result = (|| -> Result<bool, rustacuda::error::CudaError> {
@@ -551,8 +494,6 @@ impl GpuVanitySearch {
             Ok(found[0] != 0)
         })();
 
-        // _context will be automatically dropped here, which pops the context
-
         // Handle any CUDA errors
         match result {
             Ok(found_result) => {
@@ -601,7 +542,7 @@ impl Drop for GpuVanitySearch {
             println!("Cleaning up CUDA device {}: {}", i, device.device_name);
 
             // We'll try to lock the resources for cleanup, but if we can't, we'll just log and continue
-            if let Ok(mut resources) = device.context_and_resources.lock() {
+            if let Ok(mut resources) = device.resources.lock() {
                 // First synchronize the stream
                 if let Err(e) = resources.stream.synchronize() {
                     println!(
@@ -641,8 +582,14 @@ mod tests {
         let initial_salt = B256::ZERO.to_vec();
 
         // Test without namespace
-        let result =
-            gpu.search_with_threads_create3(&deployer.as_slice(), "", "", &initial_salt, 1, 1);
+        let result = gpu.search_with_threads_create3(
+            &deployer.as_slice(),
+            "",
+            "",
+            &initial_salt,
+            Some(1),
+            Some(1),
+        );
         assert!(result.is_some(), "Should find a result");
 
         let found_salt = result.unwrap();
@@ -674,8 +621,8 @@ mod tests {
             "",
             TEST_NAMESPACE,
             &initial_salt,
-            1,
-            1,
+            Some(1),
+            Some(1),
         );
         assert!(result.is_some(), "Should find a result");
 
@@ -707,16 +654,28 @@ mod tests {
         let initial_salt = B256::ZERO.to_vec();
 
         // Test with a prefix that doesn't match - should return None
-        let result =
-            gpu.search_with_threads_create3(&deployer.as_slice(), "ffff", "", &initial_salt, 1, 1);
+        let result = gpu.search_with_threads_create3(
+            &deployer.as_slice(),
+            "ffff",
+            "",
+            &initial_salt,
+            Some(1),
+            Some(1),
+        );
         assert!(
             result.is_none(),
             "Should not find a result with non-matching prefix in single iteration"
         );
 
         // Test with a prefix that should be findable
-        let result =
-            gpu.search_with_threads_create3(&deployer.as_slice(), "0", "", &initial_salt, 1, 65536);
+        let result = gpu.search_with_threads_create3(
+            &deployer.as_slice(),
+            "0",
+            "",
+            &initial_salt,
+            Some(1),
+            Some(65536),
+        );
         assert!(result.is_some(), "Should find a result with simple prefix");
 
         let found_salt = result.unwrap();
@@ -736,13 +695,10 @@ mod tests {
         let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
 
         if gpu.devices.is_empty()
-            || gpu.devices.iter().all(|d| {
-                d.context_and_resources
-                    .lock()
-                    .unwrap()
-                    .create2_module
-                    .is_none()
-            })
+            || gpu
+                .devices
+                .iter()
+                .all(|d| d.resources.lock().unwrap().create2_module.is_none())
         {
             println!("Skipping CREATE2 test as module is not available on any device");
             return;
@@ -758,8 +714,8 @@ mod tests {
             "",
             &bytecode_hash,
             &initial_salt,
-            1,
-            1,
+            Some(1),
+            Some(1),
         );
 
         if let Some(found_salt) = result {
@@ -793,6 +749,6 @@ mod tests {
             .expect("Invalid test salt")
             .to_vec();
 
-        gpu.search_with_threads_create3(&invalid_deployer, "", "", &salt, 1, 1);
+        gpu.search_with_threads_create3(&invalid_deployer, "", "", &salt, Some(1), Some(1));
     }
 }
