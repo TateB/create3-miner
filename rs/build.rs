@@ -30,7 +30,7 @@ fn main() {
         }
 
         // Copy PTX file to shader directory
-        std::fs::copy(out_dir.join("CREATE3.ptx"), cuda_dir.join("CREATE3.ptx"))
+        std::fs::copy(out_dir.join("CREATE2.ptx"), cuda_dir.join("CREATE2.ptx"))
             .expect("Failed to copy PTX file");
 
         // Compile CUDA to PTX
