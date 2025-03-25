@@ -177,9 +177,17 @@ impl GpuVanitySearch {
 
     // Helper method to load a PTX module from file
     fn load_ptx_module(ptx_name: &str) -> Result<Module, rustacuda::error::CudaError> {
-        // First try to load from file system
-        let ptx_path = format!("../shader/{}", ptx_name);
-        println!("Loading PTX from: {}", ptx_path);
+        // Resolve absolute path from the current file location
+        let current_file = std::path::Path::new(file!());
+        let current_dir = current_file.parent().unwrap();
+        let ptx_path = current_dir
+            .join("..")
+            .join("..")
+            .join("shader")
+            .join(ptx_name)
+            .to_string_lossy()
+            .into_owned();
+        println!("Resolved PTX path: {}", ptx_path);
 
         // Try to read the file
         match std::fs::read_to_string(&ptx_path) {
