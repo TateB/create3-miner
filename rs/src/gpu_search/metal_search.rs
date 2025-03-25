@@ -1,5 +1,8 @@
+#[cfg(feature = "metal")]
 use hex;
+#[cfg(feature = "metal")]
 use metal::*;
+#[cfg(feature = "metal")]
 use objc::rc::autoreleasepool;
 
 fn is_debug() -> bool {
