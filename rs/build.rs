@@ -10,6 +10,8 @@ fn main() {
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let cuda_dir = PathBuf::from("src/shader");
 
+        println!("OUT_DIR: {}", out_dir.to_str().unwrap());
+
         // Compile CUDA to PTX
         let status = Command::new("nvcc")
             .args(&[
