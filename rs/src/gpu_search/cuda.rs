@@ -3,7 +3,7 @@ use rustacuda::memory::DeviceBuffer;
 use rustacuda::prelude::*;
 use std::cell::Cell;
 use std::ffi::CString;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Instant;
 
 // A thread-safe wrapper for a device's resources
@@ -96,8 +96,9 @@ impl GpuVanitySearch {
         let device_name = device.name().unwrap_or_default();
         println!("Initializing CUDA device {}: {}", device_id, device_name);
 
-        // Create a primary context for this device
-        let context = match Context::create_and_push(
+        // Create a context for this device
+        // This context needs to be pushed when in use and will be automatically popped when dropped
+        let _context = match Context::create_and_push(
             ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
             device,
         ) {
@@ -119,7 +120,7 @@ impl GpuVanitySearch {
                     "Failed to create CUDA stream for device {}: {}",
                     device_id, e
                 );
-                // Context will be popped in drop
+                // Context will be automatically popped when _context is dropped
                 return None;
             }
         };
@@ -132,7 +133,7 @@ impl GpuVanitySearch {
                     "Failed to load CREATE3 CUDA module for device {}: {}",
                     device_id, e
                 );
-                // Stream and context will be dropped and popped automatically
+                // Stream and context will be dropped automatically
                 return None;
             }
         };
@@ -166,8 +167,7 @@ impl GpuVanitySearch {
             stream,
         };
 
-        // Pop context - we'll push it back when needed
-        Context::pop().expect("Failed to pop context");
+        // _context will be dropped here and automatically popped
 
         Some(GpuDevice {
             device_id,
@@ -293,7 +293,7 @@ impl GpuVanitySearch {
             }
         };
 
-        // Set up the device context for this operation
+        // Get the device for creating a context
         let device_instance = match Device::get_device(device.device_id) {
             Ok(d) => d,
             Err(e) => {
@@ -302,23 +302,17 @@ impl GpuVanitySearch {
             }
         };
 
-        // Create a new primary context for this operation
-        let context = match PrimaryContext::new(device_instance) {
+        // Create a new context for this operation
+        let _context = match Context::create_and_push(
+            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
+            device_instance,
+        ) {
             Ok(ctx) => ctx,
             Err(e) => {
                 println!(
-                    "Error creating primary context for device {}: {}",
+                    "Error creating context for device {}: {}",
                     device.device_id, e
                 );
-                return None;
-            }
-        };
-
-        // Begin the primary context scope
-        let _context_guard = match context.begin() {
-            Ok(guard) => guard,
-            Err(e) => {
-                println!("Error beginning primary context: {}", e);
                 return None;
             }
         };
@@ -379,7 +373,7 @@ impl GpuVanitySearch {
             Ok(found[0] != 0)
         })();
 
-        // Context guard and resources guard will be dropped here
+        // _context will be automatically dropped here, which pops the context
 
         // Handle any CUDA errors
         match result {
@@ -482,7 +476,7 @@ impl GpuVanitySearch {
         let mut result_salt = vec![0u8; 32];
         let mut found = vec![0i32; 1];
 
-        // Set up the device context for this operation
+        // Get the device for creating a context
         let device_instance = match Device::get_device(device.device_id) {
             Ok(d) => d,
             Err(e) => {
@@ -491,23 +485,17 @@ impl GpuVanitySearch {
             }
         };
 
-        // Create a new primary context for this operation
-        let context = match PrimaryContext::new(device_instance) {
+        // Create a new context for this operation
+        let _context = match Context::create_and_push(
+            ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO,
+            device_instance,
+        ) {
             Ok(ctx) => ctx,
             Err(e) => {
                 println!(
-                    "Error creating primary context for device {}: {}",
+                    "Error creating context for device {}: {}",
                     device.device_id, e
                 );
-                return None;
-            }
-        };
-
-        // Begin the primary context scope
-        let _context_guard = match context.begin() {
-            Ok(guard) => guard,
-            Err(e) => {
-                println!("Error beginning primary context: {}", e);
                 return None;
             }
         };
@@ -563,7 +551,7 @@ impl GpuVanitySearch {
             Ok(found[0] != 0)
         })();
 
-        // Context guard and resources guard will be dropped here
+        // _context will be automatically dropped here, which pops the context
 
         // Handle any CUDA errors
         match result {
