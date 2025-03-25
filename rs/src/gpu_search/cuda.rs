@@ -177,20 +177,8 @@ impl GpuVanitySearch {
 
     // Helper method to load a PTX module from file
     fn load_ptx_module(ptx_name: &str) -> Result<Module, rustacuda::error::CudaError> {
-        // Resolve absolute path from the current file location
-        let current_file = std::path::Path::new(file!());
-        let current_dir = current_file.parent().unwrap();
-        let ptx_path = current_dir
-            .join("..")
-            .join("..")
-            .join("shader")
-            .join(ptx_name)
-            .to_string_lossy()
-            .into_owned();
-        println!("Resolved PTX path: {}", ptx_path);
-
         // Try to read the file
-        match std::fs::read_to_string(&ptx_path) {
+        match include_str!("../shader/CREATE3.ptx") {
             Ok(content) => {
                 // Convert to CString
                 match CString::new(content) {
@@ -202,7 +190,7 @@ impl GpuVanitySearch {
                 }
             }
             Err(e) => {
-                println!("Error reading PTX file {}: {}", ptx_path, e);
+                println!("Error reading PTX file {}: {}", ptx_name, e);
                 Err(rustacuda::error::CudaError::FileNotFound)
             }
         }
