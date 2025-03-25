@@ -121,8 +121,10 @@ impl GpuVanitySearch {
             }
         };
 
+        let create3_string = include_str!("../shader/CREATE3.ptx");
+
         // Load the CREATE3 CUDA module - required for basic functionality
-        let create3_module = match Self::load_ptx_module("CREATE3.ptx") {
+        let create3_module = match Self::load_ptx_module(create3_string) {
             Ok(module) => {
                 println!(
                     "Successfully loaded CREATE3 CUDA module for device {}",
@@ -139,8 +141,9 @@ impl GpuVanitySearch {
             }
         };
 
+        let create2_string = include_str!("../shader/CREATE2.ptx");
         // Try to load the CREATE2 CUDA module - optional feature
-        let create2_module = match Self::load_ptx_module("CREATE2.ptx") {
+        let create2_module = match Self::load_ptx_module(create2_string) {
             Ok(module) => {
                 println!(
                     "Successfully loaded CREATE2 CUDA module for device {}",
@@ -176,22 +179,12 @@ impl GpuVanitySearch {
     }
 
     // Helper method to load a PTX module from file
-    fn load_ptx_module(ptx_name: &str) -> Result<Module, rustacuda::error::CudaError> {
-        // Try to read the file
-        match include_str!("../shader/CREATE3.ptx") {
-            Ok(content) => {
-                // Convert to CString
-                match CString::new(content) {
-                    Ok(ptx) => Module::load_from_string(&ptx),
-                    Err(e) => {
-                        println!("Error creating CString from PTX content: {}", e);
-                        Err(rustacuda::error::CudaError::InvalidValue)
-                    }
-                }
-            }
+    fn load_ptx_module(ptx_str: &str) -> Result<Module, rustacuda::error::CudaError> {
+        match CString::new(ptx_str) {
+            Ok(ptx) => Module::load_from_string(&ptx),
             Err(e) => {
-                println!("Error reading PTX file {}: {}", ptx_name, e);
-                Err(rustacuda::error::CudaError::FileNotFound)
+                println!("Error creating CString from PTX content: {}", e);
+                Err(rustacuda::error::CudaError::InvalidValue)
             }
         }
     }
