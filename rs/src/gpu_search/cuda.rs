@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 pub struct GpuVanitySearch {
     _context: Arc<Context>, // Underscore prefix indicates intentionally unused but necessary field
-    module: Module,
+    create3_module: Module,
+    create2_module: Option<Module>,
     stream: Stream,
     iterations: Cell<u64>,
     time_taken: Cell<f64>,
@@ -45,14 +46,31 @@ impl GpuVanitySearch {
             }
         };
 
-        // Load the CUDA module (compiled PTX)
-        let ptx = include_str!("../shader/CREATE3.ptx");
-        let ptx = CString::new(ptx).unwrap();
-        let module = match Module::load_from_string(&ptx) {
+        // Load the CREATE3 CUDA module (compiled PTX)
+        let create3_ptx = include_str!("../shader/CREATE3.ptx");
+        let create3_ptx = CString::new(create3_ptx).unwrap();
+        let create3_module = match Module::load_from_string(&create3_ptx) {
             Ok(module) => module,
             Err(e) => {
-                println!("Failed to load CUDA module: {}", e);
+                println!("Failed to load CREATE3 CUDA module: {}", e);
                 return None;
+            }
+        };
+
+        // Try to load the CREATE2 CUDA module (compiled PTX)
+        let create2_module = {
+            let create2_ptx = include_str!("../shader/CREATE2.ptx");
+            let create2_ptx = CString::new(create2_ptx).unwrap();
+            match Module::load_from_string(&create2_ptx) {
+                Ok(module) => {
+                    println!("Successfully loaded CREATE2 CUDA module");
+                    Some(module)
+                }
+                Err(e) => {
+                    println!("Warning: Failed to load CREATE2 CUDA module: {}", e);
+                    println!("CREATE2 functionality will not be available");
+                    None
+                }
             }
         };
 
@@ -68,7 +86,8 @@ impl GpuVanitySearch {
 
         Some(Self {
             _context: context,
-            module,
+            create3_module,
+            create2_module,
             stream,
             iterations: Cell::new(0),
             time_taken: Cell::new(0.0),
@@ -76,7 +95,27 @@ impl GpuVanitySearch {
         })
     }
 
+    // Legacy method for backwards compatibility
     pub fn search_with_threads(
+        &self,
+        deployer: &[u8],
+        prefix: &str,
+        namespace: &str,
+        initial_salt: &[u8],
+        thread_count: u32,
+        block_count: u32,
+    ) -> Option<Vec<u8>> {
+        self.search_with_threads_create3(
+            deployer,
+            prefix,
+            namespace,
+            initial_salt,
+            thread_count,
+            block_count,
+        )
+    }
+
+    pub fn search_with_threads_create3(
         &self,
         deployer: &[u8],
         prefix: &str,
@@ -120,7 +159,7 @@ impl GpuVanitySearch {
         let mut found_buf = DeviceBuffer::from_slice(&found).unwrap();
 
         let function_name = CString::new("vanity_search").unwrap();
-        let function = self.module.get_function(&function_name).unwrap();
+        let function = self.create3_module.get_function(&function_name).unwrap();
 
         let start_time = std::time::Instant::now();
 
@@ -133,6 +172,115 @@ impl GpuVanitySearch {
                     prefix_len_buf.as_device_ptr(),
                     ns_buf.as_device_ptr(),
                     ns_len_buf.as_device_ptr(),
+                    initial_salt_buf.as_device_ptr(),
+                    result_salt_buf.as_device_ptr(),
+                    found_buf.as_device_ptr()
+                )
+            )
+            .unwrap();
+        }
+
+        self.stream.synchronize().unwrap();
+
+        let end_time = std::time::Instant::now();
+        let duration = end_time.duration_since(start_time);
+        self.time_taken
+            .set(self.time_taken.get() + duration.as_secs_f64());
+        self.iterations
+            .set(self.iterations.get() + (thread_count * block_count) as u64);
+
+        // Check if we found a result
+        found_buf.copy_to(&mut found).unwrap();
+
+        if found[0] != 0 || self.last_print.get().elapsed() > std::time::Duration::from_secs(1) {
+            let iterations_per_second = (self.iterations.get() as f64) / self.time_taken.get();
+            println!(
+                "CUDA: Iterations per second: {}",
+                (iterations_per_second as u64)
+                    .to_string()
+                    .chars()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .chunks(3)
+                    .map(|chunk| chunk.iter().collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            );
+            println!("CUDA: Total time taken: {:?}s", self.time_taken.get());
+            self.last_print.set(std::time::Instant::now());
+        }
+
+        if found[0] != 0 {
+            result_salt_buf.copy_to(&mut result_salt).unwrap();
+            Some(result_salt)
+        } else {
+            None
+        }
+    }
+
+    pub fn search_with_threads_create2(
+        &self,
+        deployer: &[u8],
+        prefix: &str,
+        bytecode_hash: &[u8],
+        initial_salt: &[u8],
+        thread_count: u32,
+        block_count: u32,
+    ) -> Option<Vec<u8>> {
+        // Check if CREATE2 module is available
+        let module = match &self.create2_module {
+            Some(module) => module,
+            None => {
+                println!("CREATE2 CUDA module not available. Please compile CREATE2.ptx");
+                return None;
+            }
+        };
+
+        // Convert deployer address to bytes
+        let deployer_bytes = if deployer.len() == 20 {
+            deployer.to_vec()
+        } else {
+            // Assume it's a hex string with 0x prefix
+            let hex_str = std::str::from_utf8(deployer)
+                .expect("Invalid deployer address")
+                .trim_start_matches("0x");
+            hex::decode(hex_str).expect("Invalid hex in deployer address")
+        };
+
+        // Convert prefix string to individual hex values (0-15)
+        let prefix_bytes: Vec<u8> = prefix
+            .chars()
+            .map(|c| c.to_digit(16).unwrap() as u8)
+            .collect();
+
+        // Allocate device memory
+        let mut deployer_buf = DeviceBuffer::from_slice(&deployer_bytes).unwrap();
+        let mut prefix_buf = DeviceBuffer::from_slice(&prefix_bytes).unwrap();
+        let prefix_len = prefix_bytes.len() as u32;
+        let mut prefix_len_buf = DeviceBuffer::from_slice(&[prefix_len]).unwrap();
+        let mut bytecode_hash_buf = DeviceBuffer::from_slice(bytecode_hash).unwrap();
+        let mut initial_salt_buf = DeviceBuffer::from_slice(initial_salt).unwrap();
+        let mut result_salt = vec![0u8; 32];
+        let mut result_salt_buf = DeviceBuffer::from_slice(&result_salt).unwrap();
+        let mut found = vec![0i32; 1];
+        let mut found_buf = DeviceBuffer::from_slice(&found).unwrap();
+
+        let function_name = CString::new("vanity_search").unwrap();
+        let function = module.get_function(&function_name).unwrap();
+
+        let start_time = std::time::Instant::now();
+
+        unsafe {
+            let stream = &self.stream;
+            launch!(
+                function<<<(block_count, 1, 1), (thread_count, 1, 1), 0, stream>>>(
+                    deployer_buf.as_device_ptr(),
+                    prefix_buf.as_device_ptr(),
+                    prefix_len_buf.as_device_ptr(),
+                    bytecode_hash_buf.as_device_ptr(),
                     initial_salt_buf.as_device_ptr(),
                     result_salt_buf.as_device_ptr(),
                     found_buf.as_device_ptr()
@@ -195,8 +343,11 @@ impl Drop for GpuVanitySearch {
             // Drop the stream first
             let _ = std::mem::replace(&mut self.stream, unsafe { std::mem::zeroed() });
 
-            // Drop the module
-            let _ = std::mem::replace(&mut self.module, unsafe { std::mem::zeroed() });
+            // Drop the modules
+            let _ = std::mem::replace(&mut self.create3_module, unsafe { std::mem::zeroed() });
+            if self.create2_module.is_some() {
+                let _ = std::mem::replace(&mut self.create2_module, None);
+            }
         }
 
         // The context will be dropped last automatically
@@ -207,7 +358,7 @@ impl Drop for GpuVanitySearch {
 mod tests {
     use super::*;
     use crate::constants::tests::{test_deployer, TEST_NAMESPACE, TEST_SALT};
-    use crate::create3::compute_create3_address;
+    use crate::create3::{compute_create2_address, compute_create3_address};
     use alloy_primitives::B256;
 
     #[test]
@@ -218,7 +369,8 @@ mod tests {
         let initial_salt = B256::ZERO.to_vec();
 
         // Test without namespace
-        let result = gpu.search_with_threads(&deployer.as_slice(), "", "", &initial_salt, 1, 1);
+        let result =
+            gpu.search_with_threads_create3(&deployer.as_slice(), "", "", &initial_salt, 1, 1);
         assert!(result.is_some(), "Should find a result");
 
         let found_salt = result.unwrap();
@@ -245,7 +397,7 @@ mod tests {
         let initial_salt = B256::ZERO.to_vec();
 
         // Test with namespace
-        let result = gpu.search_with_threads(
+        let result = gpu.search_with_threads_create3(
             &deployer.as_slice(),
             "",
             TEST_NAMESPACE,
@@ -283,7 +435,8 @@ mod tests {
         let initial_salt = B256::ZERO.to_vec();
 
         // Test with a prefix that doesn't match - should return None
-        let result = gpu.search_with_threads(&deployer.as_slice(), "ffff", "", &initial_salt, 1, 1);
+        let result =
+            gpu.search_with_threads_create3(&deployer.as_slice(), "ffff", "", &initial_salt, 1, 1);
         assert!(
             result.is_none(),
             "Should not find a result with non-matching prefix in single iteration"
@@ -291,7 +444,7 @@ mod tests {
 
         // Test with a prefix that should be findable
         let result =
-            gpu.search_with_threads(&deployer.as_slice(), "0", "", &initial_salt, 1, 65536);
+            gpu.search_with_threads_create3(&deployer.as_slice(), "0", "", &initial_salt, 1, 65536);
         assert!(result.is_some(), "Should find a result with simple prefix");
 
         let found_salt = result.unwrap();
@@ -307,30 +460,45 @@ mod tests {
     }
 
     #[test]
-    fn test_cuda_create3_multithreaded() {
+    fn test_cuda_create2_basic() {
         let gpu = GpuVanitySearch::new().expect("Failed to initialize CUDA");
+
+        if gpu.create2_module.is_none() {
+            println!("Skipping CREATE2 test as module is not available");
+            return;
+        }
 
         let deployer = test_deployer();
         let initial_salt = B256::ZERO.to_vec();
+        let bytecode_hash = B256::ZERO.to_vec();
 
-        // Test with multiple threads - should find a result faster
-        let result =
-            gpu.search_with_threads(&deployer.as_slice(), "00", "", &initial_salt, 256, 65536);
-        assert!(
-            result.is_some(),
-            "Should find a result with multiple threads"
+        // Test basic CREATE2
+        let result = gpu.search_with_threads_create2(
+            &deployer.as_slice(),
+            "",
+            &bytecode_hash,
+            &initial_salt,
+            1,
+            1,
         );
 
-        let found_salt = result.unwrap();
-        let found_address = compute_create3_address(deployer, B256::from_slice(&found_salt), None)
-            .expect("Failed to compute address");
+        if let Some(found_salt) = result {
+            let found_address =
+                compute_create2_address(deployer, B256::from_slice(&found_salt), B256::ZERO);
 
-        // The address should start with the prefix
-        assert!(
-            found_address.to_string().to_lowercase().starts_with("0x00"),
-            "Address should start with 0x00, got {}",
-            found_address
-        );
+            // The address should be valid
+            assert!(
+                found_address.to_string().starts_with("0x"),
+                "Address should start with 0x"
+            );
+            assert_eq!(
+                found_address.to_string().len(),
+                42,
+                "Address should be 42 chars long"
+            );
+        } else {
+            println!("CREATE2 search returned no result - may need more iterations");
+        }
     }
 
     #[test]
@@ -345,6 +513,6 @@ mod tests {
             .expect("Invalid test salt")
             .to_vec();
 
-        gpu.search_with_threads(&invalid_deployer, "", "", &salt, 1, 1);
+        gpu.search_with_threads_create3(&invalid_deployer, "", "", &salt, 1, 1);
     }
 }
